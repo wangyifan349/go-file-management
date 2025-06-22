@@ -113,7 +113,7 @@ Please follow Go coding conventions and write clear commit messages.
 
 ## License 📄
 
-This project is licensed under the MIT License. See `LICENSE` file for details.
+This project is licensed under the GPL-3.0  License. See `LICENSE` file for details.
 
 ---
 
