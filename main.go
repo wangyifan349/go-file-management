@@ -15,10 +15,10 @@ import (
 )
 
 var (
-	baseDir    = "./userfiles" // 根文件目录，存放所有用户文件
+	baseDir    = "./userfiles" // Base directory for storing user files
 	db         *sql.DB
-	dbFile     = "./users.db" // SQLite数据库文件
-	listenAddr = ":8080"       // 监听地址
+	dbFile     = "./users.db"  // SQLite database file
+	listenAddr = ":8080"       // Listening address for the server
 )
 
 func main() {
@@ -42,7 +42,7 @@ func main() {
 	log.Fatal(http.ListenAndServe(listenAddr, nil))
 }
 
-// initDatabase initializes the user database and creates the users table if needed.
+// initDatabase initializes the user database and creates the users table if it doesn't exist.
 func initDatabase() {
 	var err error
 	db, err = sql.Open("sqlite3", dbFile)
@@ -60,7 +60,7 @@ func initDatabase() {
 	}
 }
 
-// loginPageHandler serves the login/registration HTML page.
+// loginPageHandler serves the login and registration HTML page.
 func loginPageHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	html := getLoginPageHTML()
@@ -70,7 +70,7 @@ func loginPageHandler(w http.ResponseWriter, r *http.Request) {
 // loginHandler processes login POST requests.
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "POST method only", http.StatusMethodNotAllowed)
+		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	userName := r.FormValue("username")
@@ -92,7 +92,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 // registerHandler processes user registration POST requests.
 func registerHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "POST method only", http.StatusMethodNotAllowed)
+		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	userName := r.FormValue("username")
@@ -115,7 +115,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{"success": true, "msg": "Registration successful"})
 }
 
-// rootHandler serves the main file management page after login.
+// rootHandler serves the main file management page after successful login.
 func rootHandler(w http.ResponseWriter, r *http.Request) {
 	userName, err := getUserName(w, r)
 	if err != nil {
@@ -126,17 +126,17 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(html))
 }
 
-// getUserName reads the username from cookie or redirects to login page if missing.
+// getUserName retrieves the username from the cookie or redirects to the login page if the cookie is missing.
 func getUserName(w http.ResponseWriter, r *http.Request) (string, error) {
 	cookie, err := r.Cookie("username")
 	if err != nil || cookie.Value == "" {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return "", fmt.Errorf("not logged in")
+		return "", fmt.Errorf("user not logged in")
 	}
 	return cookie.Value, nil
 }
 
-// filesHandler returns JSON of files in the requested user directory.
+// filesHandler provides a JSON response containing the list of files in the requested user directory.
 func filesHandler(w http.ResponseWriter, r *http.Request) {
 	userName, relativePath, err := parseUserPath(r)
 	if err != nil {
@@ -172,7 +172,7 @@ func filesHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "files": fileList})
 }
 
-// uploadHandler handles file uploads to user's directory.
+// uploadHandler allows users to upload files to their directory.
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	userName, err := getUserName(w, r)
 	if err != nil {
@@ -218,7 +218,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{"success": true, "msg": "Upload successful"})
 }
 
-// downloadHandler serves file downloads.
+// downloadHandler enables users to download files.
 func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/download/"), "/")
 	if len(parts) < 2 {
@@ -240,7 +240,7 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, absolutePath)
 }
 
-// deleteHandler deletes a file or empty directory.
+// deleteHandler deletes a file or an empty directory.
 func deleteHandler(w http.ResponseWriter, r *http.Request) {
 	userName, err := getUserName(w, r)
 	if err != nil {
@@ -266,10 +266,10 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	err = os.Remove(absolutePath)
 	if err != nil {
-		http.Error(w, "Delete failed, directory must be empty", http.StatusBadRequest)
+		http.Error(w, "Deletion failed; directory must be empty", http.StatusBadRequest)
 		return
 	}
-	jsonResponse(w, map[string]interface{}{"success": true, "msg": "Delete successful"})
+	jsonResponse(w, map[string]interface{}{"success": true, "msg": "Deletion successful"})
 }
 
 // mkdirHandler creates a new directory.
@@ -296,19 +296,19 @@ func mkdirHandler(w http.ResponseWriter, r *http.Request) {
 	newDirectoryPath := filepath.Join(absoluteParentPath, dirName)
 	err = os.Mkdir(newDirectoryPath, 0755)
 	if err != nil {
-		http.Error(w, "Create directory failed", http.StatusInternalServerError)
+		http.Error(w, "Failed to create directory", http.StatusInternalServerError)
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"success": true, "msg": "Directory created successfully"})
 }
 
-// renameHandler renames a file or directory.
+// renameHandler renames a file or a directory.
 func renameHandler(w http.ResponseWriter, r *http.Request) {
 	userName, err := getUserName(w, r)
 	if err != nil {
 		return
 	}
-	oldPath := r.FormValue("path")
+	oldName := r.FormValue("path")
 	newName := r.FormValue("newname")
 	if newName == "" || strings.ContainsAny(newName, `/\`) {
 		http.Error(w, "Invalid new name", http.StatusBadRequest)
@@ -316,14 +316,14 @@ func renameHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userRootPath := filepath.Join(baseDir, userName)
-	absoluteOldPath := filepath.Join(userRootPath, oldPath)
+	absoluteOldPath := filepath.Join(userRootPath, oldName)
 	if !strings.HasPrefix(absoluteOldPath, userRootPath) {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
 	}
 
 	if _, err := os.Stat(absoluteOldPath); err != nil {
-		http.Error(w, "Old path does not exist", http.StatusBadRequest)
+		http.Error(w, "Original path does not exist", http.StatusBadRequest)
 		return
 	}
 
@@ -335,29 +335,29 @@ func renameHandler(w http.ResponseWriter, r *http.Request) {
 
 	err = os.Rename(absoluteOldPath, newPath)
 	if err != nil {
-		http.Error(w, "Rename failed", http.StatusInternalServerError)
+		http.Error(w, "Renaming failed", http.StatusInternalServerError)
 		return
 	}
-	jsonResponse(w, map[string]interface{}{"success": true, "msg": "Rename successful"})
+	jsonResponse(w, map[string]interface{}{"success": true, "msg": "Renaming successful"})
 }
 
-// moveHandler moves file or directory to a new path.
+// moveHandler moves a file or a directory to a new location.
 func moveHandler(w http.ResponseWriter, r *http.Request) {
 	userName, err := getUserName(w, r)
 	if err != nil {
 		return
 	}
 	oldPath := r.FormValue("path")
-	newPath := r.FormValue("newpath")
+	newDestination := r.FormValue("newpath")
 
-	if oldPath == "" || newPath == "" {
+	if oldPath == "" || newDestination == "" {
 		http.Error(w, "Missing parameters", http.StatusBadRequest)
 		return
 	}
 
 	userRootPath := filepath.Join(baseDir, userName)
 	absoluteOldPath := filepath.Join(userRootPath, oldPath)
-	absoluteNewDir := filepath.Join(userRootPath, newPath)
+	absoluteNewDir := filepath.Join(userRootPath, newDestination)
 
 	if !strings.HasPrefix(absoluteOldPath, userRootPath) || !strings.HasPrefix(absoluteNewDir, userRootPath) {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
@@ -378,18 +378,18 @@ func moveHandler(w http.ResponseWriter, r *http.Request) {
 	destinationPath := filepath.Join(absoluteNewDir, filepath.Base(absoluteOldPath))
 	err = os.Rename(absoluteOldPath, destinationPath)
 	if err != nil {
-		http.Error(w, "Move failed", http.StatusInternalServerError)
+		http.Error(w, "Moving failed", http.StatusInternalServerError)
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"success": true, "msg": "Move successful"})
 }
 
-// parseUserPath extracts username and relative path from URL path /files/<username>/<relpath>
+// parseUserPath extracts the username and the relative path from the URL path /files/<username>/<relpath>
 func parseUserPath(r *http.Request) (string, string, error) {
 	trimmedPath := strings.TrimPrefix(r.URL.Path, "/files/")
 	parts := strings.Split(trimmedPath, "/")
 	if len(parts) < 1 {
-		return "", "", fmt.Errorf("path parse error")
+		return "", "", fmt.Errorf("path parsing error")
 	}
 	userName := parts[0]
 	if userName == "" || strings.ContainsAny(userName, `/\`) {
@@ -404,18 +404,20 @@ func parseUserPath(r *http.Request) (string, string, error) {
 	return userName, relPath, nil
 }
 
+// jsonError sends a JSON error response with the specified message.
 func jsonError(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(fmt.Sprintf(`{"success":false,"msg":"%s"}`, msg)))
 }
 
+// jsonResponse sends a JSON response with the specified data.
 func jsonResponse(w http.ResponseWriter, data map[string]interface{}) {
 	jsonData, _ := json.Marshal(data)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(jsonData)
 }
 
-// getLoginPageHTML returns the login and registration page HTML.
+// getLoginPageHTML provides the HTML content for the login and registration page.
 func getLoginPageHTML() string {
 	return `
 <!DOCTYPE html>
@@ -484,7 +486,7 @@ document.getElementById("registerForm").onsubmit = async function(e){
 `
 }
 
-// getFileManagerPageHTML returns the file manager main page HTML with the given userName.
+// getFileManagerPageHTML returns the main file manager page HTML content with the provided userName.
 func getFileManagerPageHTML(userName string) string {
 	page := `
 <!DOCTYPE html>
