@@ -6,6 +6,9 @@ from flask import (
     Flask, request, send_from_directory, abort, render_template,
     redirect, url_for, flash, jsonify, session
 )
+from flask_wtf import FlaskForm, CSRFProtect
+from wtforms import StringField, PasswordField, FileField, SubmitField, MultipleFileField
+from wtforms.validators import DataRequired, EqualTo, Length, Regexp, ValidationError
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from urllib.parse import unquote
@@ -14,6 +17,9 @@ from jinja2 import DictLoader
 # 初始化 Flask 应用
 app = Flask(__name__)
 app.secret_key = 'change_this_to_a_random_secret_key'  # 生产环境中请更改为随机的密钥
+
+# 设置 CSRF 保护
+csrf = CSRFProtect(app)
 
 # 设置数据库路径和用户文件根目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -64,7 +70,7 @@ def safe_join(base_path, *paths):
     安全地连接路径，防止路径遍历攻击。
     """
     final_path = os.path.abspath(os.path.join(base_path, *paths))
-    if not final_path.startswith(base_path):
+    if not final_path.startswith(os.path.abspath(base_path)):
         raise ValueError("Attempted access outside of base directory")
     return final_path
 
@@ -202,26 +208,35 @@ TEMPLATES = {
     <div class="mx-auto" style="max-width: 400px;">
       <h3 class="mb-4">注册</h3>
       <form method="post" novalidate>
+        {{ form.hidden_tag() }}
         <!-- 用户名输入框 -->
         <div class="mb-3">
-          <label for="username" class="form-label">用户名</label>
-          <!-- 用户名要求3-20个字符，只能包含字母、数字、下划线 -->
-          <input type="text" class="form-control" id="username" name="username" required minlength="3" maxlength="20"
-                 pattern="^[a-zA-Z0-9_]+$" autofocus />
-          <small class="form-text text-muted">只能包含字母、数字、下划线，长度3-20</small>
+          {{ form.username.label(class="form-label") }}
+          {{ form.username(class="form-control", autofocus=True) }}
+          {% if form.username.errors %}
+              <small class="text-danger">{{ form.username.errors[0] }}</small>
+          {% else %}
+              <small class="form-text text-muted">只能包含字母、数字、下划线，长度3-20</small>
+          {% endif %}
         </div>
         <!-- 密码输入框 -->
         <div class="mb-3">
-          <label for="password" class="form-label">密码</label>
-          <input type="password" class="form-control" id="password" name="password" required minlength="6" maxlength="64" />
+          {{ form.password.label(class="form-label") }}
+          {{ form.password(class="form-control") }}
+          {% if form.password.errors %}
+              <small class="text-danger">{{ form.password.errors[0] }}</small>
+          {% endif %}
         </div>
         <!-- 确认密码输入框 -->
         <div class="mb-3">
-          <label for="password2" class="form-label">确认密码</label>
-          <input type="password" class="form-control" id="password2" name="password2" required minlength="6" maxlength="64" />
+          {{ form.password2.label(class="form-label") }}
+          {{ form.password2(class="form-control") }}
+          {% if form.password2.errors %}
+              <small class="text-danger">{{ form.password2.errors[0] }}</small>
+          {% endif %}
         </div>
         <!-- 提交按钮 -->
-        <button type="submit" class="btn btn-primary w-100">注册</button>
+        {{ form.submit(class="btn btn-primary w-100") }}
         <!-- 已有账号链接 -->
         <div class="mt-3 text-center">
           <a href="{{ url_for('login') }}">已有账号？去登录</a>
@@ -238,18 +253,25 @@ TEMPLATES = {
     <div class="mx-auto" style="max-width: 400px;">
       <h3 class="mb-4">登录</h3>
       <form method="post" novalidate>
+        {{ form.hidden_tag() }}
         <!-- 用户名输入框 -->
         <div class="mb-3">
-          <label for="username" class="form-label">用户名</label>
-          <input type="text" class="form-control" id="username" name="username" required autofocus />
+          {{ form.username.label(class="form-label") }}
+          {{ form.username(class="form-control", autofocus=True) }}
+          {% if form.username.errors %}
+              <small class="text-danger">{{ form.username.errors[0] }}</small>
+          {% endif %}
         </div>
         <!-- 密码输入框 -->
         <div class="mb-3">
-          <label for="password" class="form-label">密码</label>
-          <input type="password" class="form-control" id="password" name="password" required />
+          {{ form.password.label(class="form-label") }}
+          {{ form.password(class="form-control") }}
+          {% if form.password.errors %}
+              <small class="text-danger">{{ form.password.errors[0] }}</small>
+          {% endif %}
         </div>
         <!-- 提交按钮 -->
-        <button type="submit" class="btn btn-primary w-100">登录</button>
+        {{ form.submit(class="btn btn-primary w-100") }}
         <!-- 没有账号链接 -->
         <div class="mt-3 text-center">
           <a href="{{ url_for('register') }}">没有账号？去注册</a>
@@ -266,23 +288,33 @@ TEMPLATES = {
     <div class="mx-auto" style="max-width: 400px;">
       <h3 class="mb-4">修改密码</h3>
       <form method="post" novalidate>
+        {{ form.hidden_tag() }}
         <!-- 旧密码输入框 -->
         <div class="mb-3">
-          <label for="oldpassword" class="form-label">旧密码</label>
-          <input type="password" class="form-control" id="oldpassword" name="oldpassword" required autofocus />
+          {{ form.oldpassword.label(class="form-label") }}
+          {{ form.oldpassword(class="form-control", autofocus=True) }}
+          {% if form.oldpassword.errors %}
+              <small class="text-danger">{{ form.oldpassword.errors[0] }}</small>
+          {% endif %}
         </div>
         <!-- 新密码输入框 -->
         <div class="mb-3">
-          <label for="newpassword" class="form-label">新密码</label>
-          <input type="password" class="form-control" id="newpassword" name="newpassword" required minlength="6" maxlength="64" />
+          {{ form.newpassword.label(class="form-label") }}
+          {{ form.newpassword(class="form-control") }}
+          {% if form.newpassword.errors %}
+              <small class="text-danger">{{ form.newpassword.errors[0] }}</small>
+          {% endif %}
         </div>
         <!-- 确认新密码输入框 -->
         <div class="mb-3">
-          <label for="newpassword2" class="form-label">确认新密码</label>
-          <input type="password" class="form-control" id="newpassword2" name="newpassword2" required minlength="6" maxlength="64" />
+          {{ form.newpassword2.label(class="form-label") }}
+          {{ form.newpassword2(class="form-control") }}
+          {% if form.newpassword2.errors %}
+              <small class="text-danger">{{ form.newpassword2.errors[0] }}</small>
+          {% endif %}
         </div>
         <!-- 提交按钮 -->
-        <button type="submit" class="btn btn-primary w-100">修改密码</button>
+        {{ form.submit(class="btn btn-primary w-100") }}
         <!-- 返回文件管理链接 -->
         <div class="mt-3 text-center">
           <a href="{{ url_for('list_files') }}">返回文件管理</a>
@@ -309,10 +341,13 @@ TEMPLATES = {
       </ol>
     </nav>
 
-    <!-- 目录标题和上传按钮 -->
+    <!-- 目录标题和操作按钮 -->
     <div class="d-flex justify-content-between align-items-center mb-3">
       <h4>欢迎，{{ username }}，当前目录：{{ '/' + current_path if current_path else '/' }}</h4>
-      <a href="{{ url_for('upload_file', subpath=current_path) }}" class="btn btn-success">上传文件</a>
+      <div>
+        <a href="{{ url_for('create_folder', subpath=current_path) }}" class="btn btn-secondary me-2">新建文件夹</a>
+        <a href="{{ url_for('upload_file', subpath=current_path) }}" class="btn btn-success">上传文件</a>
+      </div>
     </div>
 
     <!-- 文件列表表格 -->
@@ -590,10 +625,49 @@ TEMPLATES = {
     <!-- 上传文件表单 -->
     <h4>上传文件到：{{ '/' + current_path if current_path else '/' }}</h4>
     <form method="post" enctype="multipart/form-data" class="mb-3">
+      {{ form.hidden_tag() }}
       <div class="mb-3">
-        <input type="file" class="form-control" name="file" required />
+        {{ form.files.label(class="form-label") }}
+        {{ form.files(class="form-control") }}
+        {% if form.files.errors %}
+            <small class="text-danger">{{ form.files.errors[0] }}</small>
+        {% endif %}
       </div>
-      <button type="submit" class="btn btn-primary">上传</button>
+      {{ form.submit(class="btn btn-primary") }}
+      <a href="{{ url_for('list_files', subpath=current_path) }}" class="btn btn-secondary ms-2">返回</a>
+    </form>
+    {% endblock %}
+    ''',
+
+    'create_folder.html': '''
+    {% extends 'base.html' %}
+
+    {% block content %}
+    <!-- 面包屑导航 -->
+    <nav aria-label="breadcrumb">
+      <ol class="breadcrumb">
+        {% for name, link in breadcrumb %}
+          <li class="breadcrumb-item {% if loop.last %}active{% endif %}"
+              {% if loop.last %}aria-current="page"{% else %}><a href="{{ link }}">{% endif %}>
+            {{ name }}
+          {% if not loop.last %}</a>{% endif %}
+          </li>
+        {% endfor %}
+      </ol>
+    </nav>
+
+    <!-- 新建文件夹表单 -->
+    <h4>新建文件夹在：{{ '/' + current_path if current_path else '/' }}</h4>
+    <form method="post" class="mb-3">
+      {{ form.hidden_tag() }}
+      <div class="mb-3">
+        {{ form.folder_name.label(class="form-label") }}
+        {{ form.folder_name(class="form-control", autofocus=True) }}
+        {% if form.folder_name.errors %}
+            <small class="text-danger">{{ form.folder_name.errors[0] }}</small>
+        {% endif %}
+      </div>
+      {{ form.submit(class="btn btn-primary") }}
       <a href="{{ url_for('list_files', subpath=current_path) }}" class="btn btn-secondary ms-2">返回</a>
     </form>
     {% endblock %}
@@ -606,8 +680,9 @@ TEMPLATES = {
     <div class="mx-auto" style="max-width: 600px;">
       <h3 class="mb-4">全目录搜索 - {{ username }}</h3>
       <form method="post" class="d-flex mb-3" novalidate>
-        <input type="text" name="keyword" class="form-control me-2" placeholder="请输入搜索关键字" required autofocus />
-        <button type="submit" class="btn btn-primary">搜索</button>
+        {{ form.hidden_tag() }}
+        {{ form.keyword(class="form-control me-2", placeholder="请输入搜索关键字", autofocus=True) }}
+        {{ form.submit(class="btn btn-primary") }}
       </form>
       <a href="{{ url_for('list_files') }}">返回文件管理</a>
     </div>
@@ -647,6 +722,57 @@ TEMPLATES = {
 # 注册模板字典到 Flask 应用的 Jinja2 环境
 app.jinja_loader = DictLoader(TEMPLATES)
 
+# 定义表单类
+class RegistrationForm(FlaskForm):
+    username = StringField('用户名', validators=[
+        DataRequired(message="用户名不能为空"),
+        Length(min=3, max=20, message="用户名长度必须在3到20之间"),
+        Regexp('^[a-zA-Z0-9_]+$', message="用户名只能包含字母、数字和下划线")
+    ])
+    password = PasswordField('密码', validators=[
+        DataRequired(message="密码不能为空"),
+        Length(min=6, max=64, message="密码长度必须在6到64之间")
+    ])
+    password2 = PasswordField('确认密码', validators=[
+        DataRequired(message="请确认密码"),
+        EqualTo('password', message="两次输入的密码不一致")
+    ])
+    submit = SubmitField('注册')
+
+class LoginForm(FlaskForm):
+    username = StringField('用户名', validators=[DataRequired(message="用户名不能为空")])
+    password = PasswordField('密码', validators=[DataRequired(message="密码不能为空")])
+    submit = SubmitField('登录')
+
+class ChangePasswordForm(FlaskForm):
+    oldpassword = PasswordField('旧密码', validators=[DataRequired(message="旧密码不能为空")])
+    newpassword = PasswordField('新密码', validators=[
+        DataRequired(message="新密码不能为空"),
+        Length(min=6, max=64, message="新密码长度必须在6到64之间")
+    ])
+    newpassword2 = PasswordField('确认新密码', validators=[
+        DataRequired(message="请确认新密码"),
+        EqualTo('newpassword', message="两次输入的新密码不一致")
+    ])
+    submit = SubmitField('修改密码')
+
+class UploadForm(FlaskForm):
+    # 支持多文件上传
+    files = MultipleFileField('选择文件', validators=[DataRequired(message="请选择文件")])
+    submit = SubmitField('上传')
+
+class CreateFolderForm(FlaskForm):
+    folder_name = StringField('文件夹名称', validators=[
+        DataRequired(message="文件夹名称不能为空"),
+        Length(min=1, max=255, message="文件夹名称长度不能超过255个字符"),
+        Regexp('^[^/\\?:*"<>\|]+$', message="文件夹名称包含非法字符")
+    ])
+    submit = SubmitField('创建')
+
+class SearchForm(FlaskForm):
+    keyword = StringField('搜索关键字', validators=[DataRequired(message="请输入搜索关键字")])
+    submit = SubmitField('搜索')
+
 # 路由和视图函数
 
 @app.route('/register', methods=['GET', 'POST'])
@@ -654,50 +780,34 @@ def register():
     """
     用户注册路由。
     """
-    if request.method == 'POST':
-        username = request.form.get('username', '').strip()
-        password = request.form.get('password', '')
-        password_confirm = request.form.get('password2', '')
+    form = RegistrationForm()
+    if form.validate_on_submit():
+        username = form.username.data.strip()
+        password = form.password.data
 
-        # 表单验证
-        if not username or not password or not password_confirm:
-            flash("请填写所有字段", "warning")
-            return redirect(request.url)
-        if password != password_confirm:
-            flash("两次输入的密码不一致", "danger")
-            return redirect(request.url)
-
-        # 用户名格式验证
-        if not username.isalnum():
-            flash("用户名只能包含字母和数字", "danger")
-            return redirect(request.url)
-
-        # 密码哈希并保存用户信息
-        password_hash = generate_password_hash(password)
         connection = get_db_connection()
         cursor = connection.cursor()
         try:
+            password_hash = generate_password_hash(password)
             cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, password_hash))
             connection.commit()
             flash("注册成功，请登录", "success")
             return redirect(url_for('login'))
         except sqlite3.IntegrityError:
-            # 用户名已存在
             flash("用户名已存在", "danger")
-            return redirect(request.url)
         finally:
             connection.close()
-
-    return render_template('register.html')
+    return render_template('register.html', form=form)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """
     用户登录路由。
     """
-    if request.method == 'POST':
-        username = request.form.get('username', '').strip()
-        password = request.form.get('password', '')
+    form = LoginForm()
+    if form.validate_on_submit():
+        username = form.username.data.strip()
+        password = form.password.data
 
         connection = get_db_connection()
         cursor = connection.cursor()
@@ -712,16 +822,15 @@ def login():
             return redirect(next_page or url_for('list_files'))
         else:
             flash("用户名或密码错误", "danger")
-            return redirect(request.url)
 
-    return render_template('login.html')
+    return render_template('login.html', form=form)
 
 @app.route('/logout')
 def logout():
     """
     用户登出路由，清除会话并重定向到登录页面。
     """
-    session.pop('username', None)
+    session.clear()
     flash("已退出登录", "info")
     return redirect(url_for('login'))
 
@@ -731,18 +840,10 @@ def change_password():
     """
     修改密码路由。
     """
-    if request.method == 'POST':
-        old_password = request.form.get('oldpassword', '')
-        new_password = request.form.get('newpassword', '')
-        new_password_confirm = request.form.get('newpassword2', '')
-
-        # 表单验证
-        if not old_password or not new_password or not new_password_confirm:
-            flash("请填写所有字段", "warning")
-            return redirect(request.url)
-        if new_password != new_password_confirm:
-            flash("两次输入的新密码不一致", "danger")
-            return redirect(request.url)
+    form = ChangePasswordForm()
+    if form.validate_on_submit():
+        old_password = form.oldpassword.data
+        new_password = form.newpassword.data
 
         current_username = session['username']
         connection = get_db_connection()
@@ -754,6 +855,11 @@ def change_password():
             connection.close()
             return redirect(request.url)
 
+        if check_password_hash(user['password_hash'], new_password):
+            flash("新密码不能与旧密码相同", "danger")
+            connection.close()
+            return redirect(request.url)
+
         # 更新密码
         new_hash = generate_password_hash(new_password)
         cursor.execute("UPDATE users SET password_hash = ? WHERE username = ?", (new_hash, current_username))
@@ -762,7 +868,7 @@ def change_password():
         flash("密码修改成功，请重新登录", "success")
         return redirect(url_for('logout'))
 
-    return render_template('changepwd.html')
+    return render_template('changepwd.html', form=form)
 
 @app.route('/files/', defaults={'subpath': ''})
 @app.route('/files/<path:subpath>')
@@ -779,21 +885,24 @@ def list_files(subpath):
         abort(403)
 
     if not os.path.isdir(abs_path):
-        abort(404, description="Directory not found")
+        abort(404, description="目录不存在")
 
     entries = []
     for entry_name in os.listdir(abs_path):
         entry_path = os.path.join(abs_path, entry_name)
-        entry_info = {
-            'name': entry_name,
-            'is_dir': os.path.isdir(entry_path),
-            'is_image': False,
-            'is_video': False
-        }
-        if not entry_info['is_dir']:
-            entry_info['is_image'] = is_image_file(entry_name)
-            entry_info['is_video'] = is_video_file(entry_name)
-        entries.append(entry_info)
+        try:
+            entry_info = {
+                'name': entry_name,
+                'is_dir': os.path.isdir(entry_path),
+                'is_image': False,
+                'is_video': False
+            }
+            if not entry_info['is_dir']:
+                entry_info['is_image'] = is_image_file(entry_name)
+                entry_info['is_video'] = is_video_file(entry_name)
+            entries.append(entry_info)
+        except (PermissionError, FileNotFoundError):
+            continue  # 忽略无法访问的文件或目录
 
     # 排序：目录在前，文件在后，按名称排序
     entries.sort(key=lambda entry: (not entry['is_dir'], entry['name'].lower()))
@@ -824,22 +933,58 @@ def upload_file(subpath):
 
     os.makedirs(upload_dir, exist_ok=True)
 
-    if request.method == 'POST':
-        if 'file' not in request.files:
-            flash("请求中没有文件部分", "danger")
-            return redirect(request.url)
-        upload_file = request.files['file']
-        if upload_file.filename == '':
-            flash("未选择文件", "warning")
-            return redirect(request.url)
-        filename = secure_filename(upload_file.filename)
-        save_path = os.path.join(upload_dir, filename)
-        upload_file.save(save_path)
-        flash(f"文件 '{filename}' 上传成功！", "success")
+    form = UploadForm()
+    if form.validate_on_submit():
+        files = form.files.data
+        for upload_file in files:
+            if upload_file.filename == '':
+                continue
+            filename = secure_filename(upload_file.filename)
+            if filename == '':
+                continue
+            save_path = os.path.join(upload_dir, filename)
+            upload_file.save(save_path)
+        flash("文件上传成功！", "success")
         return redirect(url_for('list_files', subpath=subpath))
 
     breadcrumb = build_breadcrumb(subpath)
     return render_template('upload.html',
+                           form=form,
+                           current_path=subpath,
+                           breadcrumb=breadcrumb,
+                           username=session.get('username'))
+
+@app.route('/create_folder/', defaults={'subpath': ''}, methods=['GET', 'POST'])
+@app.route('/create_folder/<path:subpath>', methods=['GET', 'POST'])
+@login_required
+def create_folder(subpath):
+    """
+    创建新文件夹。
+    """
+    subpath = unquote(subpath)
+    user_dir = get_current_user_dir()
+    try:
+        current_dir = safe_join(user_dir, subpath)
+    except ValueError:
+        abort(403)
+
+    form = CreateFolderForm()
+    if form.validate_on_submit():
+        folder_name = secure_filename(form.folder_name.data.strip())
+        new_folder_path = os.path.join(current_dir, folder_name)
+        if os.path.exists(new_folder_path):
+            flash("已存在同名文件夹", "danger")
+        else:
+            try:
+                os.makedirs(new_folder_path)
+                flash("文件夹创建成功！", "success")
+                return redirect(url_for('list_files', subpath=subpath))
+            except Exception as e:
+                flash(f"文件夹创建失败：{e}", "danger")
+
+    breadcrumb = build_breadcrumb(subpath)
+    return render_template('create_folder.html',
+                           form=form,
                            current_path=subpath,
                            breadcrumb=breadcrumb,
                            username=session.get('username'))
@@ -858,7 +1003,7 @@ def download_file(filepath):
         abort(403)
 
     if not os.path.isfile(abs_path):
-        abort(404, description="File not found")
+        abort(404, description="文件不存在")
     directory = os.path.dirname(abs_path)
     filename = os.path.basename(abs_path)
     return send_from_directory(directory, filename, as_attachment=True)
@@ -892,7 +1037,7 @@ def api_move():
         return jsonify(success=False, message="目标目录已存在同名文件/文件夹"), 409
 
     try:
-        os.rename(abs_source, dest_final)
+        shutil.move(abs_source, dest_final)
     except Exception as ex:
         return jsonify(success=False, message=f"移动失败：{ex}"), 500
 
@@ -951,6 +1096,10 @@ def api_rename():
 
     parent_directory = os.path.dirname(abs_target)
     new_name_safe = secure_filename(new_name)
+
+    if not new_name_safe:
+        return jsonify(success=False, message="新名称无效"), 400
+
     new_abs_path = os.path.join(parent_directory, new_name_safe)
 
     if os.path.exists(new_abs_path):
@@ -1009,12 +1158,9 @@ def search():
     """
     全局搜索功能，使用最长公共子序列算法进行模糊匹配。
     """
-    if request.method == 'POST':
-        keyword = request.form.get('keyword', '').strip()
-        if not keyword:
-            flash("请输入搜索关键字", "warning")
-            return redirect(url_for('search'))
-
+    form = SearchForm()
+    if form.validate_on_submit():
+        keyword = form.keyword.data.strip()
         user_directory = get_current_user_dir()
         all_files = walk_user_files(user_directory)
 
@@ -1039,8 +1185,9 @@ def search():
                                username=current_user)
     else:
         current_user = session['username']
-        return render_template('search_page.html', username=current_user)
+        return render_template('search_page.html', form=form, username=current_user)
 
 # 运行应用
 if __name__ == '__main__':
-    app.run(debug=True)  # 在调试模式下运行应用
+    # 判断是否在开发环境中，如果是，则启用调试模式
+    app.run(debug=True)  # 在生产环境中，请将 debug=False
