@@ -70,7 +70,7 @@ def index(req_path):
         abort(404)
     dirs = []
     files = []
-    for entry in os.listdir(safe_path):
+    for entry in sorted(os.listdir(safe_path), key=lambda x: x.lower()):
         full_path = os.path.join(safe_path, entry)
         rel_path = os.path.join(req_path, entry) if req_path else entry
         if os.path.isdir(full_path):
@@ -94,7 +94,10 @@ def upload_file(upload_path):
         return '未选择文件', 400
     filename = os.path.basename(file.filename)
     save_path = os.path.join(safe_path, filename)
-    file.save(save_path)
+    try:
+        file.save(save_path)
+    except OSError as e:
+        return f'保存文件失败: {e}', 500
     return redirect(url_for('index', req_path=upload_path))
 
 @app.route('/download/<path:download_path>')
@@ -121,7 +124,6 @@ def delete():
         if os.path.isfile(abs_path):
             os.remove(abs_path)
         elif os.path.isdir(abs_path):
-            # 删除时递归删除目录内所有内容
             import shutil
             shutil.rmtree(abs_path)
         else:
@@ -188,6 +190,13 @@ def move():  # 支持拖拽移动文件夹和文件
         return jsonify(success=False, error='源文件或目录不存在'), 404
     if not os.path.isdir(abs_dst_dir):
         return jsonify(success=False, error='目标目录不存在'), 404
+
+    # 防止将父目录移动到子目录，造成死循环
+    normalized_src_rel = os.path.normpath(src_rel)
+    normalized_dst_rel = os.path.normpath(dst_rel)
+    if normalized_dst_rel.startswith(normalized_src_rel + os.sep) or normalized_dst_rel == normalized_src_rel:
+        return jsonify(success=False, error='无法移动到自身或子目录'), 400
+
     name = os.path.basename(abs_src)
     abs_dst = os.path.join(abs_dst_dir, name)
     if os.path.exists(abs_dst):
@@ -251,93 +260,169 @@ def logout():
     session.clear()
     return redirect(url_for('login'))
 
+
 LOGIN_HTML = '''
 <!doctype html>
-<title>登录</title>
-<h2>登录</h2>
-<form method="post">
-  用户名：<input name="username" required><br>
-  密码：<input name="password" type="password" required><br>
-  <button type="submit">登录</button>
-</form>
-<p style="color:red;">{{ error }}</p>
-<p><a href="{{ url_for("register") }}">注册新账号</a></p>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>登录</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light d-flex justify-content-center align-items-center" style="height:100vh;">
+<div class="card shadow-sm p-4" style="min-width:320px; max-width: 400px; width:100%;">
+  <h3 class="mb-3 text-center">登录</h3>
+  {% if error %}
+  <div class="alert alert-danger small mb-3">{{ error }}</div>
+  {% endif %}
+  <form method="post" novalidate>
+    <div class="mb-3">
+      <label for="username" class="form-label">用户名</label>
+      <input type="text" class="form-control" id="username" name="username" required autofocus>
+    </div>
+    <div class="mb-3">
+      <label for="password" class="form-label">密码</label>
+      <input type="password" class="form-control" id="password" name="password" required>
+    </div>
+    <button class="btn btn-primary w-100" type="submit">登录</button>
+  </form>
+  <hr>
+  <p class="text-center small mb-0">没有账号？ <a href="{{ url_for('register') }}">注册</a></p>
+</div>
+</body>
+</html>
 '''
 
 REGISTER_HTML = '''
 <!doctype html>
-<title>注册</title>
-<h2>注册</h2>
-<form method="post">
-  用户名：<input name="username" required><br>
-  密码：<input name="password" type="password" required><br>
-  <button type="submit">注册</button>
-</form>
-<p style="color:red;">{{ error }}</p>
-<p><a href="{{ url_for("login") }}">已有账号，登录</a></p>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>注册</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light d-flex justify-content-center align-items-center" style="height:100vh;">
+<div class="card shadow-sm p-4" style="min-width:320px; max-width: 400px; width:100%;">
+  <h3 class="mb-3 text-center">注册</h3>
+  {% if error %}
+  <div class="alert alert-danger small mb-3">{{ error }}</div>
+  {% endif %}
+  <form method="post" novalidate>
+    <div class="mb-3">
+      <label for="username" class="form-label">用户名</label>
+      <input type="text" class="form-control" id="username" name="username" required autofocus>
+    </div>
+    <div class="mb-3">
+      <label for="password" class="form-label">密码</label>
+      <input type="password" class="form-control" id="password" name="password" required>
+    </div>
+    <button class="btn btn-primary w-100" type="submit">注册</button>
+  </form>
+  <hr>
+  <p class="text-center small mb-0">已有账号？ <a href="{{ url_for('login') }}">登录</a></p>
+</div>
+</body>
+</html>
 '''
 
 INDEX_HTML = '''
 <!doctype html>
-<html>
+<html lang="zh-CN">
 <head>
   <title>文件管理 - {{ path or "/" }}</title>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Bootstrap 5 CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    body { font-family: Arial, sans-serif; }
-    ul { list-style-type:none; padding-left:0; }
-    li { margin: 5px 0; cursor: grab; }
-    button { margin-left: 5px; }
-    #drop-area { border: 2px dashed #ccc; padding: 20px; margin-top: 15px; }
+    body { font-family: Arial, sans-serif; background-color: #f8f9fa; min-height: 100vh; }
+    #filelist li { cursor: grab; }
+    #filelist li.dragging { opacity: 0.5; }
+    .file-name { user-select: none; }
+    a, button { user-select: none; }
   </style>
 </head>
 <body>
-<h2>目录： /{{ path }}</h2>
-<p><a href="{{ url_for('logout') }}">登出</a></p>
+<nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ url_for('index') }}">文件管理</a>
+    <div>
+      <span class="text-light me-3">目录： /{{ path or "" }}</span>
+      <a href="{{ url_for('logout') }}" class="btn btn-outline-light btn-sm">登出</a>
+    </div>
+  </div>
+</nav>
 
-<button onclick="createFolder()">创建新文件夹</button>
+<div class="container py-4">
+  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <button class="btn btn-success" onclick="createFolder()">
+      <i class="bi bi-folder-plus"></i> 新建文件夹
+    </button>
+    <form id="upload-form" action="{{ url_for('upload_file', upload_path=path) }}" method="post" enctype="multipart/form-data" class="d-flex gap-2 align-items-center flex-wrap">
+      <input type="file" name="file" required class="form-control form-control-sm" style="max-width:300px;">
+      <button type="submit" class="btn btn-primary btn-sm">上传文件</button>
+    </form>
+  </div>
 
-<ul id="filelist" ondragover="dragOver(event)" ondrop="drop(event, '{{ path }}')" >
-  {% if parent_path is not none %}
-    <li draggable="false"><a href="{{ url_for('index', req_path=parent_path) }}">.. (返回上层)</a></li>
-  {% endif %}
-  {% for d in dirs %}
-    <li draggable="true"
-        ondragstart="dragStart(event)"
-        data-path="{{ d }}">
-      📁 <a href="{{ url_for('index', req_path=d) }}">{{ d|basename }}/</a>
-      <button onclick="renameItem('{{ d }}')">重命名</button>
-      <button onclick="deleteItem('{{ d }}')">删除</button>
+  <ul id="filelist" class="list-group" ondragover="dragOver(event)" ondrop="drop(event, '{{ path }}')" >
+    {% if parent_path is not none %}
+      <li class="list-group-item d-flex justify-content-between align-items-center" draggable="false">
+        <a href="{{ url_for('index', req_path=parent_path) }}" class="text-decoration-none">&larr; .. (返回上层)</a>
+      </li>
+    {% endif %}
+    {% for d in dirs %}
+    <li class="list-group-item d-flex justify-content-between align-items-center" draggable="true" ondragstart="dragStart(event)" data-path="{{ d }}">
+      <div class="file-name">
+        📁 
+        <a href="{{ url_for('index', req_path=d) }}" class="link-primary text-decoration-none fw-semibold">{{ d|basename }}/</a>
+      </div>
+      <div class="btn-group btn-group-sm" role="group" aria-label="文件夹操作">
+        <button class="btn btn-warning" onclick="renameItem('{{ d }}')" title="重命名">
+          <i class="bi bi-pencil-square"></i>
+        </button>
+        <button class="btn btn-danger" onclick="deleteItem('{{ d }}')" title="删除">
+          <i class="bi bi-trash"></i>
+        </button>
+      </div>
     </li>
-  {% endfor %}
-  {% for f in files %}
-    <li draggable="true"
-        ondragstart="dragStart(event)"
-        data-path="{{ f }}">
-      📄 {{ f|basename }}
-      [<a href="{{ url_for('download_file', download_path=f) }}">下载</a>]
-      <button onclick="renameItem('{{ f }}')">重命名</button>
-      <button onclick="deleteItem('{{ f }}')">删除</button>
-      {% if is_media(f) %}
-        [<a href="{{ url_for('play_file', media_path=f) }}" target="_blank">在线播放</a>]
-      {% endif %}
+    {% endfor %}
+    {% for f in files %}
+    <li class="list-group-item d-flex justify-content-between align-items-center" draggable="true" ondragstart="dragStart(event)" data-path="{{ f }}">
+      <div class="file-name">
+        📄 {{ f|basename }}
+        [<a href="{{ url_for('download_file', download_path=f) }}" class="link-secondary" title="下载"><i class="bi bi-download"></i></a>]
+        {% if is_media(f) %}
+          [<a href="{{ url_for('play_file', media_path=f) }}" target="_blank" class="link-success" title="在线播放"><i class="bi bi-play-circle"></i></a>]
+        {% endif %}
+      </div>
+      <div class="btn-group btn-group-sm" role="group" aria-label="文件操作">
+        <button class="btn btn-warning" onclick="renameItem('{{ f }}')" title="重命名">
+          <i class="bi bi-pencil-square"></i>
+        </button>
+        <button class="btn btn-danger" onclick="deleteItem('{{ f }}')" title="删除">
+          <i class="bi bi-trash"></i>
+        </button>
+      </div>
     </li>
-  {% endfor %}
-</ul>
+    {% endfor %}
+  </ul>
+</div>
 
-<h3>上传文件</h3>
-<form id="upload-form" action="{{ url_for('upload_file', upload_path=path) }}" method="post" enctype="multipart/form-data">
-  <input type="file" name="file" required>
-  <button type="submit">上传</button>
-</form>
+<!-- Bootstrap Icons CDN -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+
+<!-- Bootstrap 5 JS Bundle (popper + bootstrap) -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
 <script>
-
 let draggedPath = null;
 
 function dragStart(ev) {
   draggedPath = ev.target.getAttribute('data-path');
   ev.dataTransfer.effectAllowed = 'move';
+  ev.target.classList.add('dragging');
 }
 
 function dragOver(ev) {
@@ -346,14 +431,17 @@ function dragOver(ev) {
 
 function drop(ev, currentFolder) {
   ev.preventDefault();
+  const li = document.querySelector('.dragging');
+  if(li) li.classList.remove('dragging');
   if (!draggedPath) return;
-  // 拖拽目标是当前folder子目录，避免循环嵌套
+
+  // 防止将自身或子目录移动到当前目录
   if (draggedPath === currentFolder || currentFolder.startsWith(draggedPath + '/')) {
     alert('无法移动到自身或子目录');
     draggedPath = null;
     return;
   }
-  // 调用move接口，把draggedPath移动到currentFolder
+
   fetch('{{ url_for("move") }}', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -364,7 +452,7 @@ function drop(ev, currentFolder) {
         alert('移动成功');
         location.reload();
       } else {
-        alert('错误:' + data.error);
+        alert('错误: ' + data.error);
       }
     })
     .catch(() => alert('网络出错'));
@@ -372,8 +460,14 @@ function drop(ev, currentFolder) {
 }
 
 function renameItem(oldPath) {
-  let newName = prompt("输入新名称", oldPath.split('/').pop());
+  let currentName = oldPath.split('/').pop();
+  let newName = prompt("输入新名称", currentName);
   if (!newName) return;
+  newName = newName.trim();
+  if (newName.length === 0 || newName.includes('/') || newName.includes('\\')) {
+    alert('名称不合法');
+    return;
+  }
   fetch('{{ url_for("rename") }}', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -384,7 +478,7 @@ function renameItem(oldPath) {
         alert('重命名成功');
         location.reload();
       } else {
-        alert('错误:' + data.error);
+        alert('错误: ' + data.error);
       }
     })
     .catch(() => alert('网络出错'));
@@ -402,7 +496,7 @@ function deleteItem(path) {
         alert('删除成功');
         location.reload();
       } else {
-        alert('错误:' + data.error);
+        alert('错误: ' + data.error);
       }
     })
     .catch(() => alert('网络出错'));
@@ -411,6 +505,11 @@ function deleteItem(path) {
 function createFolder() {
   let folderName = prompt("新建文件夹名称");
   if (!folderName) return;
+  folderName = folderName.trim();
+  if (folderName.length === 0 || folderName.includes('/') || folderName.includes('\\')) {
+    alert('文件夹名称不合法');
+    return;
+  }
   fetch('{{ url_for("mkdir") }}', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -421,12 +520,11 @@ function createFolder() {
         alert('创建成功');
         location.reload();
       } else {
-        alert('错误:'+data.error);
+        alert('错误: '+data.error);
       }
     })
     .catch(() => alert('网络出错'));
 }
-
 </script>
 </body>
 </html>
@@ -434,22 +532,42 @@ function createFolder() {
 
 PLAYER_HTML = '''
 <!doctype html>
-<title>在线播放 - {{ filename }}</title>
-<h2>在线播放：{{ filename }}</h2>
-{% if file_url.endswith(('.mp4', '.webm', '.ogg')) %}
-  <video width="640" height="360" controls autoplay>
-    <source src="{{ file_url }}">
-    浏览器不支持视频播放。
-  </video>
-{% elif file_url.endswith(('.mp3', '.wav', '.m4a')) %}
-  <audio controls autoplay>
-    <source src="{{ file_url }}">
-    浏览器不支持音频播放。
-  </audio>
-{% else %}
-  <p>不支持的媒体格式。</p>
-{% endif %}
-<p><a href="{{ url_for('index') }}">返回</a></p>
+<html lang="zh-CN">
+<head>
+  <title>在线播放 - {{ filename }}</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Bootstrap 5 CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background-color: #f8f9fa; padding: 2rem; text-align: center; }
+    video, audio { max-width: 100%; border-radius: 0.3rem; outline: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2 class="mb-4">在线播放：{{ filename }}</h2>
+    {% if file_url.endswith(('.mp4', '.webm', '.ogg')) %}
+    <video controls autoplay muted playsinline>
+      <source src="{{ file_url }}">
+      浏览器不支持视频播放。
+    </video>
+    {% elif file_url.endswith(('.mp3', '.wav', '.m4a')) %}
+    <audio controls autoplay>
+      <source src="{{ file_url }}">
+      浏览器不支持音频播放。
+    </audio>
+    {% else %}
+    <p class="text-danger fw-semibold">不支持的媒体格式。</p>
+    {% endif %}
+    <div class="mt-4">
+      <a href="{{ url_for('index') }}" class="btn btn-secondary">返回文件管理</a>
+    </div>
+  </div>
+  <!-- Bootstrap JS Bundle -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
 '''
 
 if __name__ == '__main__':
