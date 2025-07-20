@@ -1,0 +1,401 @@
+import os
+import shutil
+from flask import Flask, request, jsonify, send_from_directory, abort
+from werkzeug.utils import secure_filename
+
+# ---- 新增：引入 HTTPAuth ----
+from flask_httpauth import HTTPBasicAuth
+from werkzeug.security import generate_password_hash, check_password_hash
+
+app = Flask(__name__, static_folder="static", static_url_path="")
+
+# ---- 新增：配置基本认证 ----
+auth = HTTPBasicAuth()
+
+# 在这里定义允许的用户名/密码（生产环境请用更安全的存储方式）
+users = {
+    "admin": generate_password_hash("secret"),
+    "user1": generate_password_hash("pass123")
+}
+
+@auth.verify_password
+def verify_password(username, password):
+    if username in users and check_password_hash(users.get(username), password):
+        return username
+    return None
+
+@auth.error_handler
+def auth_error(status):
+    # 返回 401 并提示
+    return jsonify({"message": "未授权"}), 401
+
+# ---- 以上为新增认证部分 ----
+
+# 根目录：所有文件操作限制在此
+BASE_DIR = os.path.abspath("storage")
+os.makedirs(BASE_DIR, exist_ok=True)
+
+def safe_join(base: str, *paths: str) -> str:
+    """
+    安全拼接路径，防止目录越界
+    """
+    p = os.path.abspath(os.path.join(base, *paths))
+    if not p.startswith(base):
+        abort(400, "非法路径")
+    return p
+
+# ------------------------------------------------------------------
+# 前端页面入口
+@app.route("/")
+@auth.login_required              # 保护首页
+def index():
+    return send_from_directory(app.static_folder, "index.html")
+
+# ------------------------------------------------------------------
+# 列出目录内容
+@app.route("/api/files", methods=["GET"])
+@auth.login_required
+def list_files():
+    rel = request.args.get("path", "").strip("/")
+    abs_path = safe_join(BASE_DIR, rel)
+    if not os.path.isdir(abs_path):
+        abort(404, "目录不存在")
+    dirs, files = [], []
+    for name in sorted(os.listdir(abs_path)):
+        p = os.path.join(abs_path, name)
+        if os.path.isdir(p):
+            dirs.append(name)
+        else:
+            files.append(name)
+    return jsonify({"dirs": dirs, "files": files})
+
+# ------------------------------------------------------------------
+# 上传文件
+@app.route("/api/upload", methods=["POST"])
+@auth.login_required
+def upload_file():
+    if "file" not in request.files:
+        abort(400, "缺少文件")
+    f = request.files["file"]
+    if f.filename == "":
+        abort(400, "文件名为空")
+    rel = request.form.get("path", "").strip("/")
+    target = safe_join(BASE_DIR, rel)
+    os.makedirs(target, exist_ok=True)
+    filename = secure_filename(f.filename)
+    f.save(os.path.join(target, filename))
+    return jsonify({"message": "上传成功"})
+
+# ------------------------------------------------------------------
+# 下载文件
+@app.route("/api/download", methods=["GET"])
+@auth.login_required
+def download_file():
+    rel = request.args.get("path", "").strip("/")
+    if not rel:
+        abort(400, "缺少路径")
+    abs_path = safe_join(BASE_DIR, rel)
+    if not os.path.isfile(abs_path):
+        abort(404, "文件不存在")
+    dir_, name = os.path.split(abs_path)
+    return send_from_directory(dir_, name, as_attachment=True)
+
+# ------------------------------------------------------------------
+# 删除文件或空目录
+@app.route("/api/delete", methods=["POST"])
+@auth.login_required
+def delete():
+    data = request.get_json() or {}
+    rel = data.get("path", "").strip("/")
+    abs_path = safe_join(BASE_DIR, rel)
+    if not os.path.exists(abs_path):
+        abort(404, "不存在")
+    if os.path.isdir(abs_path):
+        try:
+            os.rmdir(abs_path)
+        except OSError:
+            abort(400, "目录非空或无法删除")
+    else:
+        os.remove(abs_path)
+    return jsonify({"message": "删除成功"})
+
+# ------------------------------------------------------------------
+# 重命名文件或目录
+@app.route("/api/rename", methods=["POST"])
+@auth.login_required
+def rename():
+    data = request.get_json() or {}
+    rel = data.get("path", "").strip("/")
+    new_name = secure_filename(data.get("new_name", ""))
+    if not rel or not new_name:
+        abort(400, "参数错误")
+    abs_old = safe_join(BASE_DIR, rel)
+    if not os.path.exists(abs_old):
+        abort(404, "源不存在")
+    parent = os.path.dirname(abs_old)
+    abs_new = os.path.join(parent, new_name)
+    if os.path.exists(abs_new):
+        abort(400, "目标已存在")
+    os.rename(abs_old, abs_new)
+    return jsonify({"message": "重命名成功"})
+
+# ------------------------------------------------------------------
+# 移动 / 拖拽操作
+@app.route("/api/move", methods=["POST"])
+@auth.login_required
+def move():
+    data = request.get_json() or {}
+    src = data.get("src", "").strip("/")
+    dst = data.get("dst", "").strip("/")  # 目标只能是目录
+    if not src:
+        abort(400, "参数错误")
+    abs_src = safe_join(BASE_DIR, src)
+    abs_dst = safe_join(BASE_DIR, dst)
+    if not os.path.exists(abs_src):
+        abort(404, "源不存在")
+    if not os.path.isdir(abs_dst):
+        abort(404, "目标不是目录")
+    name = os.path.basename(abs_src)
+    abs_new = os.path.join(abs_dst, name)
+    if os.path.exists(abs_new):
+        abort(400, "目标已存在同名")
+    shutil.move(abs_src, abs_new)
+    return jsonify({"message": "移动成功"})
+
+# ------------------------------------------------------------------
+if __name__ == "__main__":
+    # 开发模式启动
+    app.run(debug=True, port=5000)
+
+
+
+
+
+
+
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>Flask 文件管理器</title>
+  <!-- Bootstrap CSS -->
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+  >
+  <style>
+    body { padding: 20px; }
+    #tree, #files {
+      height: 70vh;
+      overflow: auto;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 10px;
+    }
+    .item {
+      padding: 4px 8px;
+      margin: 2px 0;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .item:hover { background: #f8f9fa; }
+    .folder { font-weight: bold; }
+    .drag-over { background: #d4edda !important; }
+  </style>
+</head>
+<body>
+  <div class="container-fluid">
+    <h1 class="mb-4">Flask 文件管理器</h1>
+    <div class="row">
+      <!-- 目录树 -->
+      <div class="col-md-4">
+        <h5>目录树</h5>
+        <div id="tree"></div>
+      </div>
+      <!-- 文件列表 -->
+      <div class="col-md-8">
+        <h5>当前目录：<span id="curPath">/</span></h5>
+        <div id="files"></div>
+        <div class="mt-3">
+          <input type="file" id="fileInput">
+          <button class="btn btn-primary btn-sm" onclick="upload()">上传</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bootstrap JS & Popper.js -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"
+  ></script>
+
+  <script>
+    let currentPath = "";      // 当前目录，相对于 storage
+    let dragSrc = "";          // 拖拽源路径
+
+    // 通用 AJAX wrapper
+    function api(url, method='GET', data=null) {
+      let opts = { method, headers: {} }
+      if (data) {
+        opts.headers['Content-Type'] = 'application/json'
+        opts.body = JSON.stringify(data)
+      }
+      return fetch(url, opts).then(r => {
+        if (!r.ok) throw new Error(r.statusText)
+        return r.json()
+      })
+    }
+
+    // 加载目录树（仅一层）
+    function loadTree() {
+      api(`/api/files?path=${currentPath}`).then(json => {
+        const tree = document.getElementById('tree')
+        tree.innerHTML = ''
+        // 根节点
+        let root = document.createElement('div')
+        root.textContent = '/'
+        root.className = 'item folder'
+        root.dataset.path = ''
+        root.onclick = () => { currentPath=''; refreshAll() }
+        root.ondragover = allowDrop
+        root.ondrop = drop
+        root.draggable = true
+        root.ondragstart = dragStart
+        tree.appendChild(root)
+        // 子目录
+        json.dirs.forEach(d => {
+          let div = document.createElement('div')
+          div.textContent = d
+          div.className = 'item folder'
+          div.dataset.path = currentPath ? `${currentPath}/${d}` : d
+          div.onclick = () => {
+            currentPath = div.dataset.path
+            refreshAll()
+          }
+          // 拖拽
+          div.draggable = true
+          div.ondragstart = dragStart
+          div.ondragover = allowDrop
+          div.ondrop = drop
+          tree.appendChild(div)
+        })
+      })
+    }
+
+    // 加载文件和子目录
+    function loadFiles() {
+      api(`/api/files?path=${currentPath}`).then(json => {
+        const files = document.getElementById('files')
+        files.innerHTML = ''
+        // 子目录
+        json.dirs.forEach(d => {
+          let div = document.createElement('div')
+          div.textContent = `[D] ${d}`
+          div.className = 'item folder'
+          div.dataset.name = d
+          // 右键菜单
+          div.oncontextmenu = showMenu
+          // 拖拽
+          div.draggable = true
+          div.ondragstart = dragStart
+          div.ondragover = allowDrop
+          div.ondrop = drop
+          files.appendChild(div)
+        })
+        // 文件
+        json.files.forEach(f => {
+          let div = document.createElement('div')
+          div.textContent = f
+          div.className = 'item'
+          div.dataset.name = f
+          div.oncontextmenu = showMenu
+          div.draggable = true
+          div.ondragstart = dragStart
+          files.appendChild(div)
+        })
+        document.getElementById('curPath').textContent = '/' + currentPath
+      })
+    }
+
+    // 刷新目录树 + 文件列表
+    function refreshAll() {
+      loadTree()
+      loadFiles()
+    }
+
+    // 上传
+    function upload() {
+      const fi = document.getElementById('fileInput')
+      if (!fi.files.length) return alert('请选择文件')
+      const f = fi.files[0]
+      let fd = new FormData()
+      fd.append('file', f)
+      fd.append('path', currentPath)
+      fetch('/api/upload', { method:'POST', body: fd })
+        .then(r=>r.json())
+        .then(()=> { alert('上传成功'); refreshAll(); })
+        .catch(e=>alert(e))
+    }
+
+    // 右键菜单：下载/重命名/删除
+    function showMenu(e) {
+      e.preventDefault()
+      const name = e.target.dataset.name
+      const full = currentPath ? `${currentPath}/${name}` : name
+      const choice = prompt(
+        'd=下载, r=重命名, x=删除',
+        'd'
+      )
+      if (choice === 'd') {
+        window.location = `/api/download?path=${encodeURIComponent(full)}`
+      }
+      else if (choice === 'r') {
+        const nn = prompt('新名称：', name)
+        if (nn) {
+          api('/api/rename','POST',{path:full,new_name:nn})
+            .then(()=>refreshAll())
+            .catch(e=>alert(e))
+        }
+      }
+      else if (choice === 'x') {
+        if (confirm('确认删除？')) {
+          api('/api/delete','POST',{path:full})
+            .then(()=>refreshAll())
+            .catch(e=>alert(e))
+        }
+      }
+    }
+
+    // 拖拽开始
+    function dragStart(e) {
+      const name = e.target.dataset.path || e.target.dataset.name
+      dragSrc = currentPath
+        ? `${currentPath}/${name}`
+        : name
+    }
+    // 允许放置
+    function allowDrop(e) {
+      e.preventDefault()
+      e.currentTarget.classList.add('drag-over')
+    }
+    // 放置时触发移动
+    function drop(e) {
+      e.preventDefault()
+      e.currentTarget.classList.remove('drag-over')
+      const tgt = e.currentTarget.dataset.path || currentPath
+      api('/api/move','POST',{src:dragSrc, dst:tgt})
+        .then(()=>refreshAll())
+        .catch(err=>alert(err))
+    }
+
+    // 初始加载
+    refreshAll()
+  </script>
+</body>
+</html>
+
+
+
+
+
+
