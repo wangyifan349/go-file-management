@@ -1,334 +1,233 @@
-from flask import Flask, request, send_from_directory, \
-                  render_template_string, jsonify
+from flask import Flask, request, send_from_directory, render_template_string, jsonify
 import os, shutil
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
-# Configuration
-STORAGE_ROOT = os.path.abspath('storage')
-ALLOWED_EXTENSIONS = None  # None = allow all
+# ——————— 配置 ———————
+STORAGE_ROOT = os.path.abspath('storage')       # 文件存储根目录
+ALLOWED_EXTENSIONS = None                       # None = 允许所有扩展名
 os.makedirs(STORAGE_ROOT, exist_ok=True)
 
+# ——————— 工具函数 ———————
+def is_allowed_file(fn):
+    if ALLOWED_EXTENSIONS is None: return True
+    ext = fn.rsplit('.', 1)[-1].lower()
+    return '.' in fn and ext in ALLOWED_EXTENSIONS
 
-def is_allowed_file(filename):
-    """Check file extension if a whitelist is defined."""
-    if ALLOWED_EXTENSIONS is None:
-        return True
-    ext = filename.rsplit('.', 1)[-1].lower()
-    return '.' in filename and ext in ALLOWED_EXTENSIONS
+def safe_path(rel):
+    """禁止路径穿越，确保最终路径仍在 STORAGE_ROOT 之下"""
+    full = os.path.abspath(os.path.join(STORAGE_ROOT, rel))
+    if not full.startswith(STORAGE_ROOT):
+        raise ValueError('非法路径')
+    return full
 
-
-def safe_path(relative_path):
-    """Prevent path traversal: ensure path stays under STORAGE_ROOT."""
-    full_path = os.path.abspath(os.path.join(STORAGE_ROOT, relative_path))
-    if not full_path.startswith(STORAGE_ROOT):
-        raise ValueError("Illegal path")
-    return full_path
-
-
-def build_tree(current_path):
-    """Recursively build a JSON-serializable tree of folders/files."""
-    entries = []
-    for name in sorted(os.listdir(current_path)):
-        full = os.path.join(current_path, name)
-        rel = os.path.relpath(full, STORAGE_ROOT).replace('\\', '/')
+def build_tree(cur):
+    """递归构建文件夹／文件树"""
+    out = []
+    for name in sorted(os.listdir(cur)):
+        full = os.path.join(cur, name)
+        rel = os.path.relpath(full, STORAGE_ROOT).replace('\\','/')
+        if rel == '.': rel = ''
         if os.path.isdir(full):
-            entries.append({
-                'type': 'folder',
-                'name': name,
-                'path': rel,
-                'children': build_tree(full)
-            })
+            out.append({'type':'folder','name':name,'path':rel,'children':build_tree(full)})
         else:
-            entries.append({
-                'type': 'file',
-                'name': name,
-                'path': rel
-            })
-    return entries
+            out.append({'type':'file','name':name,'path':rel})
+    return out
 
+def lcs_length(a, b):
+    """计算最长公共子序列长度"""
+    m, n = len(a), len(b)
+    dp = [[0]*(n+1) for _ in range(m+1)]
+    for i in range(m-1, -1, -1):
+        for j in range(n-1, -1, -1):
+            dp[i][j] = dp[i+1][j+1]+1 if a[i]==b[j] else max(dp[i+1][j], dp[i][j+1])
+    return dp[0][0]
 
+# ——————— 路由 ———————
 @app.route('/')
 def index():
-    """Render main page with embedded tree data."""
     tree = build_tree(STORAGE_ROOT)
-    return render_template_string(PAGE_TEMPLATE, tree=tree)
+    return render_template_string(PAGE, tree=tree)
 
-
-@app.route('/download/<path:rel_path>')
-def download(rel_path):
-    """Download a single file."""
-    full = safe_path(rel_path)
-    if os.path.isdir(full):
-        return "Cannot download a folder", 400
-    directory, filename = os.path.split(full)
-    return send_from_directory(directory, filename, as_attachment=True)
-
+@app.route('/download/<path:rel>')
+def download(rel):
+    full = safe_path(rel)
+    if os.path.isdir(full): return "Cannot download folder", 400
+    d, fn = os.path.split(full)
+    return send_from_directory(d, fn, as_attachment=True)
 
 @app.route('/upload', methods=['POST'])
 def upload():
-    """
-    Upload a file into a target folder.
-    Expects form field 'file': file data
-             form field 'target': relative folder path
-    """
-    target_folder = request.form.get('target', '')
-    dest_folder = safe_path(target_folder)
-
-    if 'file' not in request.files:
-        return jsonify(error='No file part'), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify(error='No selected file'), 400
-    if not is_allowed_file(file.filename):
-        return jsonify(error='File type not allowed'), 400
-
-    filename = secure_filename(file.filename)
-    file.save(os.path.join(dest_folder, filename))
+    tgt = safe_path(request.form.get('target',''))
+    f = request.files.get('file')
+    if not f or f.filename=='': return jsonify(error='No file'), 400
+    if not is_allowed_file(f.filename): return jsonify(error='Type not allowed'),400
+    fn = secure_filename(f.filename)
+    f.save(os.path.join(tgt, fn))
     return jsonify(ok=True)
-
 
 @app.route('/mkdir', methods=['POST'])
-def make_folder():
-    """
-    Create a subfolder under 'target'.
-    JSON body: { "target": "path", "name": "new_folder_name" }
-    """
-    data = request.get_json()
-    parent = data.get('target', '')
-    name = data.get('name', '').strip()
-    if not name:
-        return jsonify(error='Folder name required'), 400
-
-    parent_full = safe_path(parent)
-    new_folder = os.path.join(parent_full, secure_filename(name))
-    try:
-        os.makedirs(new_folder, exist_ok=False)
-    except FileExistsError:
-        return jsonify(error='Name already exists'), 400
+def mkdir():
+    data = request.get_json() or {}
+    tgt = safe_path(data.get('target',''))
+    name = data.get('name','').strip()
+    if not name: return jsonify(error='Name required'),400
+    newd = os.path.join(tgt, secure_filename(name))
+    try: os.makedirs(newd, exist_ok=False)
+    except FileExistsError: return jsonify(error='Exists'),400
     return jsonify(ok=True)
-
 
 @app.route('/rename', methods=['POST'])
-def rename_item():
-    """
-    Rename file or folder.
-    JSON body: { "path":"old_path", "newName":"new_name" }
-    """
-    data = request.get_json()
-    old_path = data.get('path', '')
-    new_name = data.get('newName', '').strip()
-    if not new_name:
-        return jsonify(error='New name required'), 400
-
-    old_full = safe_path(old_path)
-    parent_dir = os.path.dirname(old_full)
-    new_full = os.path.join(parent_dir, secure_filename(new_name))
-    if os.path.exists(new_full):
-        return jsonify(error='Name already exists'), 400
-    os.rename(old_full, new_full)
-    return jsonify(ok=True)
-
+def rename():
+    data = request.get_json() or {}
+    old = safe_path(data.get('path',''))
+    newn = data.get('newName','').strip()
+    if not newn: return jsonify(error='New name?'),400
+    dst = os.path.join(os.path.dirname(old), secure_filename(newn))
+    if os.path.exists(dst): return jsonify(error='Exists'),400
+    os.rename(old, dst); return jsonify(ok=True)
 
 @app.route('/delete', methods=['POST'])
-def delete_item():
-    """
-    Delete file or folder recursively.
-    JSON body: { "path":"item_path" }
-    """
-    data = request.get_json()
-    rel_path = data.get('path', '')
-    full_path = safe_path(rel_path)
-    if not os.path.exists(full_path):
-        return jsonify(error='Not found'), 404
-
-    if os.path.isdir(full_path):
-        shutil.rmtree(full_path)
-    else:
-        os.remove(full_path)
+def delete():
+    data = request.get_json() or {}
+    p = safe_path(data.get('path',''))
+    if not os.path.exists(p): return jsonify(error='Not found'),404
+    shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
     return jsonify(ok=True)
-
 
 @app.route('/move', methods=['POST'])
-def move_item():
-    """
-    Move file or folder to a target folder.
-    JSON body: { "src":"source_path", "dest":"dest_folder_path" }
-    """
-    data = request.get_json()
-    src = data.get('src', '')
-    dest = data.get('dest', '')
-    src_full = safe_path(src)
-    dest_full = safe_path(dest)
-    if not os.path.exists(src_full) or not os.path.isdir(dest_full):
-        return jsonify(error='Invalid source or destination'), 400
+def move():
+    data = request.get_json() or {}
+    src = safe_path(data.get('src','')); dst = safe_path(data.get('dest',''))
+    if not os.path.exists(src) or not os.path.isdir(dst): return jsonify(error='Bad'),400
+    trg = os.path.join(dst, os.path.basename(src))
+    if os.path.exists(trg): return jsonify(error='Conflict'),400
+    shutil.move(src, trg); return jsonify(ok=True)
 
-    name = os.path.basename(src_full)
-    new_location = os.path.join(dest_full, name)
-    if os.path.exists(new_location):
-        return jsonify(error='Name conflict at destination'), 400
+@app.route('/search', methods=['POST'])
+def search():
+    data = request.get_json() or {}
+    q = data.get('query','').strip().lower()
+    if not q: return jsonify(error='Query?'),400
+    res=[]; thr=0.5
+    for root, _, files in os.walk(STORAGE_ROOT):
+        rel = os.path.relpath(root, STORAGE_ROOT).replace('\\','/')
+        if rel=='.': rel=''
+        fn = os.path.basename(root)
+        if lcs_length(fn.lower(),q)/len(q)>=thr:
+            res.append({'type':'folder','name':fn,'path':rel})
+        for f in files:
+            if lcs_length(f.lower(),q)/len(q)>=thr:
+                p = (rel+'/'+f).lstrip('./')
+                res.append({'type':'file','name':f,'path':p})
+    return jsonify(results=res)
 
-    shutil.move(src_full, new_location)
-    return jsonify(ok=True)
-
-
-if __name__ == '__main__':
+# ——————— 启动 ———————
+if __name__=='__main__':
     app.run(debug=True, port=5000)
 
-
-# HTML + JS Template
-PAGE_TEMPLATE = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>File Manager</title>
-  <style>
-    body { font-family: sans-serif; padding: 1rem; }
-    ul, li { list-style: none; margin: 0; padding: 0; }
-    .tree { margin-left: 1rem; }
-    .item { padding: 0.2rem; cursor: pointer; }
-    .item:hover { background: #f0f8ff; }
-    .folder > .item::before { content: "📁 "; }
-    .file > .item::before   { content: "📄 "; }
-    .selected { background: #d0e4f5; }
-    #toolbar { margin-bottom: 1rem; }
-    button { margin-right: 0.5rem; }
-  </style>
-</head>
-<body>
-  <div id="toolbar">
-    <button id="btn-refresh">Refresh</button>
-    <button id="btn-new-folder">New Folder</button>
-    <input type="file" id="file-upload">
-  </div>
-  <div id="tree-container"></div>
-
+# ——————— 前端模板 ———————
+PAGE = """
+<!doctype html><html><head><meta charset="utf-8"><title>FileManager</title>
+<style>body{font-family:sans-serif;padding:1rem}ul,li{list-style:none;margin:0;padding:0}
+.tree{margin-left:1rem}.item{padding:.2rem;cursor:pointer}.item:hover{background:#f0f8ff}
+.folder>.item::before{content:"📁 "}.file>.item::before{content:"📄 "}
+.selected{background:#d0e4f5}#toolbar{margin-bottom:1rem}button{margin-right:.5rem}
+#search-results{border-top:1px solid #ddd;padding-top:1rem}
+</style></head><body>
+<div id="toolbar">
+  <button id="btn-refresh">Refresh</button>
+  <button id="btn-new-folder">New Folder</button>
+  <input type="file" id="file-upload">
+  <input type="text" id="search-input" placeholder="Search...">
+  <button id="btn-search">Search</button>
+</div>
+<div id="tree-container"></div>
+<div id="search-results"></div>
 <script>
-const treeData = {{ tree|tojson }};
-let selectedPath = "";  // currently selected item
-
-// Recursively render the folder/file tree
-function renderTree(container, nodes) {
-  container.innerHTML = "";
-  const ul = document.createElement("ul");
-  ul.className = "tree";
-  nodes.forEach(node => {
-    const li = document.createElement("li");
-    li.className = node.type;
-    const div = document.createElement("div");
-    div.className = "item";
-    div.textContent = node.name;
-    div.dataset.path = node.path;
-
-    // click to select
-    div.onclick = e => {
-      e.stopPropagation();
-      document.querySelectorAll('.selected')
-              .forEach(el=>el.classList.remove('selected'));
-      div.classList.add('selected');
-      selectedPath = node.path;
+let selectedPath="";
+function renderTree(cont,nodes){
+  cont.innerHTML="";const ul=document.createElement("ul");ul.className="tree";
+  nodes.forEach(n=>{
+    const li=document.createElement("li");li.className=n.type;
+    const d=document.createElement("div");d.className="item";d.textContent=n.name;
+    d.dataset.path=n.path;
+    d.onclick=e=>{e.stopPropagation();document.querySelectorAll(".selected")
+      .forEach(x=>x.classList.remove("selected"));d.classList.add("selected");
+      selectedPath=n.path};
+    d.oncontextmenu=e=>{e.preventDefault();selectedPath=n.path;
+      const a=prompt("输入 d 删除，r 重命名");if(a==="d")deleteItem(n.path);
+      if(a==="r")renameItem(n.path)};
+    d.draggable=true;d.ondragstart=e=>e.dataTransfer.setData("text/plain",n.path);
+    d.ondragover=e=>e.preventDefault();
+    d.ondrop=e=>{e.preventDefault();
+      const src=e.dataTransfer.getData("text/plain");
+      const dst=n.type==="folder"?n.path:n.path.split("/").slice(0,-1).join("/");
+      moveItem(src,dst)
     };
-
-    // right-click for delete/rename prompt
-    div.oncontextmenu = e => {
-      e.preventDefault();
-      selectedPath = node.path;
-      const action = prompt("d = delete, r = rename");
-      if (action === 'd') deleteItem(node.path);
-      if (action === 'r') renameItem(node.path);
-    };
-
-    // drag & drop to move
-    div.draggable = true;
-    div.ondragstart = e => {
-      e.dataTransfer.setData("text/plain", node.path);
-    };
-    div.ondragover = e => e.preventDefault();
-    div.ondrop = e => {
-      e.preventDefault();
-      const src = e.dataTransfer.getData("text/plain");
-      const dest = node.type === 'folder'
-                   ? node.path
-                   : node.path.split('/').slice(0, -1).join('/');
-      moveItem(src, dest);
-    };
-
-    li.appendChild(div);
-    if (node.type === 'folder' && node.children.length) {
-      renderTree(li, node.children);
-    }
+    li.appendChild(d);
+    if(n.type==="folder"&&n.children.length>0) renderTree(li,n.children);
     ul.appendChild(li);
   });
-  container.appendChild(ul);
+  cont.appendChild(ul);
 }
-
-// Generic API helper
-function api(url, data, method='POST') {
-  return fetch(url, {
-    method, 
-    headers: { 'Content-Type': 'application/json' },
-    body: data ? JSON.stringify(data) : null
-  }).then(r => r.json());
+function api(u,d,m="POST"){return fetch(u,{
+  method:m,headers:{"Content-Type":"application/json"},
+  body:d?JSON.stringify(d):null
+}).then(r=>r.json())}
+function refresh(){location.reload()}
+function createFolder(){
+  const n=prompt("New folder:");if(!n)return;
+  api("/mkdir",{target:selectedPath,name:n}).then(r=>r.ok?refresh():alert(r.error))
 }
-
-// Refresh page
-function refresh() {
-  location.reload();
+function deleteItem(p){
+  if(!confirm("Del "+p+" ?"))return;
+  api("/delete",{path:p}).then(r=>r.ok?refresh():alert(r.error))
 }
-
-// Create folder
-function createFolder() {
-  const name = prompt("New folder name:");
-  if (!name) return;
-  api('/mkdir', { target: selectedPath, name })
-    .then(res => res.ok ? refresh() : alert(res.error));
+function renameItem(p){
+  const n=prompt("New name:");if(!n)return;
+  api("/rename",{path:p,newName:n}).then(r=>r.ok?refresh():alert(r.error))
 }
-
-// Delete item
-function deleteItem(path) {
-  if (!confirm("Delete " + path + " ?")) return;
-  api('/delete', { path })
-    .then(res => res.ok ? refresh() : alert(res.error));
+function moveItem(s,d){
+  if(!confirm(`Move ${s} -> ${d}?`))return;
+  api("/move",{src:s,dest:d}).then(r=>r.ok?refresh():alert(r.error))
 }
-
-// Rename item
-function renameItem(path) {
-  const newName = prompt("New name:");
-  if (!newName) return;
-  api('/rename', { path, newName })
-    .then(res => res.ok ? refresh() : alert(res.error));
+document.getElementById("file-upload").onchange=function(){
+  if(!selectedPath)return alert("Select folder first");
+  const f=this.files[0],fd=new FormData();
+  fd.append("file",f);fd.append("target",selectedPath);
+  fetch("/upload",{method:"POST",body:fd})
+    .then(r=>r.json()).then(r=>r.ok?refresh():alert(r.error))
 }
-
-// Move item
-function moveItem(src, dest) {
-  if (!confirm(`Move "${src}" to "${dest}" ?`)) return;
-  api('/move', { src, dest })
-    .then(res => res.ok ? refresh() : alert(res.error));
+function renderSearch(res){
+  const c=document.getElementById("search-results");
+  c.innerHTML="<h4>Results:</h4>";
+  if(!res.length){c.innerHTML+="<p>No matches.</p>";return}
+  const ul=document.createElement("ul");
+  res.forEach(it=>{
+    const li=document.createElement("li");
+    li.textContent=(it.type==="folder"?"📁 ":"📄 ")+it.name+"("+it.path+")";
+    li.style.cursor="pointer";li.onclick=()=>{
+      if(it.type==="file")window.location="/download/"+encodeURIComponent(it.path);
+      else{
+        const e=document.querySelector(`.item[data-path="${it.path}"]`);
+        if(e){e.click();e.scrollIntoView({behavior:"smooth",block:"center"})}
+      }
+    };
+    ul.appendChild(li)
+  });
+  c.appendChild(ul)
 }
-
-// Upload file
-document.getElementById('file-upload').onchange = function() {
-  if (!selectedPath) {
-    return alert("Select a target folder first");
-  }
-  const file = this.files[0];
-  const form = new FormData();
-  form.append('file', file);
-  form.append('target', selectedPath);
-  fetch('/upload', { method: 'POST', body: form })
-    .then(res => res.json())
-    .then(res => res.ok ? refresh() : alert(res.error));
-};
-
-// Event bindings
-document.getElementById('btn-refresh').onclick = refresh;
-document.getElementById('btn-new-folder').onclick = createFolder;
-
-// Initial render
-renderTree(document.getElementById('tree-container'), treeData);
-</script>
-</body>
-</html>
+document.getElementById("btn-search").onclick=()=>{
+  const q=document.getElementById("search-input").value.trim();
+  if(!q)return alert("请输入关键词");
+  fetch("/search",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({query:q})})
+    .then(r=>r.json()).then(d=>d.error?alert(d.error):renderSearch(d.results))
+}
+document.getElementById("btn-refresh").onclick=refresh;
+document.getElementById("btn-new-folder").onclick=createFolder;
+renderTree(document.getElementById("tree-container"), {{ tree|tojson }});
+</script></body></html>
 """
