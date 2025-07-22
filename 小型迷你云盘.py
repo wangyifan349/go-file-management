@@ -1,574 +1,591 @@
+# -*- coding: utf-8 -*-
+"""
+一个合并了Flask后端和Bootstrap5前端的简单文件管理系统示例。
+运行前请确保已安装Flask： pip install flask
+启动后，访问 http://127.0.0.1:5000/ 即可使用。
+"""
+
 import os
-import sqlite3
+import shutil
 from flask import (
-    Flask, g, session, redirect, url_for, render_template_string,
-    request, abort, jsonify, send_from_directory
+    Flask, request, render_template_string, jsonify,
+    send_file, redirect, url_for, session
 )
-from functools import wraps
+from werkzeug.utils import secure_filename
+from pathlib import Path
 
 app = Flask(__name__)
-app.secret_key = 'your_secret_key_here'
+app.secret_key = "change_this_secret_key"
 
-FILE_ROOT = os.path.abspath('files')
-os.makedirs(FILE_ROOT, exist_ok=True)
+# 根目录，所有文件夹和文件基于此（你可以修改成你想的目录）
+BASE_DIR = Path(__file__).parent.resolve() / "storage"
+BASE_DIR.mkdir(exist_ok=True)
 
-DATABASE = 'users.db'
-
-def get_db():
-    if 'db' not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
-    return g.db
-
-@app.teardown_appcontext
-def close_db(e=None):
-    db = g.pop('db', None)
-    if db:
-        db.close()
-
-def init_db():
-    db = get_db()
-    db.execute('''
-        CREATE TABLE IF NOT EXISTS user (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-    ''')
-    db.commit()
-
-init_db()
-
-def login_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not session.get('user_id'):
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated
-
-def safe_join(root, *paths):
-    final_path = os.path.abspath(os.path.join(root, *paths))
-    if not final_path.startswith(root):
-        abort(403)
-    return final_path
-
-@app.template_filter('basename')
-def basename_filter(path):
-    return os.path.basename(path)
-
-def is_media_file(path):
-    ext = os.path.splitext(path)[1].lower()
-    return ext in {'.mp4', '.webm', '.ogg', '.mp3', '.wav', '.m4a'}
-
-@app.route('/', defaults={'req_path': ''})
-@app.route('/<path:req_path>')
-@login_required
-def index(req_path):
-    safe_path = safe_join(FILE_ROOT, req_path)
-    if not os.path.isdir(safe_path):
-        abort(404)
-    dirs = []
-    files = []
-    for entry in sorted(os.listdir(safe_path), key=lambda x: x.lower()):
-        full_path = os.path.join(safe_path, entry)
-        rel_path = os.path.join(req_path, entry) if req_path else entry
-        if os.path.isdir(full_path):
-            dirs.append(rel_path)
-        else:
-            files.append(rel_path)
-    parent_path = os.path.dirname(req_path) if req_path else None
-    return render_template_string(INDEX_HTML, path=req_path, dirs=dirs, files=files,
-                                  parent_path=parent_path, is_media=is_media_file)
-
-@app.route('/upload/<path:upload_path>', methods=['POST'])
-@login_required
-def upload_file(upload_path):
-    safe_path = safe_join(FILE_ROOT, upload_path)
-    if not os.path.isdir(safe_path):
-        abort(404)
-    if 'file' not in request.files:
-        return '无上传文件', 400
-    file = request.files['file']
-    if file.filename == '':
-        return '未选择文件', 400
-    filename = os.path.basename(file.filename)
-    save_path = os.path.join(safe_path, filename)
-    try:
-        file.save(save_path)
-    except OSError as e:
-        return f'保存文件失败: {e}', 500
-    return redirect(url_for('index', req_path=upload_path))
-
-@app.route('/download/<path:download_path>')
-@login_required
-def download_file(download_path):
-    safe_path = safe_join(FILE_ROOT, download_path)
-    if not os.path.isfile(safe_path):
-        abort(404)
-    directory = os.path.dirname(safe_path)
-    filename = os.path.basename(safe_path)
-    return send_from_directory(directory, filename, as_attachment=True)
-
-@app.route('/delete', methods=['POST'])
-@login_required
-def delete():
-    data = request.json
-    if not data or 'path' not in data:
-        return jsonify(success=False, error='参数缺失'), 400
-    rel_path = data['path']
-    abs_path = safe_join(FILE_ROOT, rel_path)
-    if not os.path.exists(abs_path):
-        return jsonify(success=False, error='文件或目录不存在'), 404
-    try:
-        if os.path.isfile(abs_path):
-            os.remove(abs_path)
-        elif os.path.isdir(abs_path):
-            import shutil
-            shutil.rmtree(abs_path)
-        else:
-            return jsonify(success=False, error='未知文件类型'), 400
-    except Exception as e:
-        return jsonify(success=False, error=str(e)), 500
-    return jsonify(success=True)
-
-@app.route('/rename', methods=['POST'])
-@login_required
-def rename():
-    data = request.json
-    if not data or 'old_path' not in data or 'new_name' not in data:
-        return jsonify(success=False, error='参数缺失'), 400
-    old_rel = data['old_path']
-    new_name = data['new_name'].strip()
-    if '/' in new_name or '\\' in new_name or new_name == '':
-        return jsonify(success=False, error='新名称不合法'), 400
-    abs_old = safe_join(FILE_ROOT, old_rel)
-    abs_new = safe_join(os.path.dirname(abs_old), new_name)
-    if not os.path.exists(abs_old):
-        return jsonify(success=False, error='原文件或目录不存在'), 404
-    if os.path.exists(abs_new):
-        return jsonify(success=False, error='目标名称已存在'), 400
-    try:
-        os.rename(abs_old, abs_new)
-    except Exception as e:
-        return jsonify(success=False, error=str(e)), 500
-    return jsonify(success=True)
-
-@app.route('/mkdir', methods=['POST'])
-@login_required
-def mkdir():
-    data = request.json
-    if not data or 'parent_path' not in data or 'folder_name' not in data:
-        return jsonify(success=False, error='参数缺失'), 400
-    parent_rel = data['parent_path']
-    folder_name = data['folder_name'].strip()
-    if '/' in folder_name or '\\' in folder_name or folder_name == '':
-        return jsonify(success=False, error='文件夹名称不合法'), 400
-    abs_parent = safe_join(FILE_ROOT, parent_rel)
-    if not os.path.isdir(abs_parent):
-        return jsonify(success=False, error='父目录不存在'), 404
-    abs_newfolder = os.path.join(abs_parent, folder_name)
-    if os.path.exists(abs_newfolder):
-        return jsonify(success=False, error='文件夹已存在'), 400
-    try:
-        os.mkdir(abs_newfolder)
-    except Exception as e:
-        return jsonify(success=False, error=str(e)), 500
-    return jsonify(success=True)
-
-@app.route('/move', methods=['POST'])
-@login_required
-def move():  # 支持拖拽移动文件夹和文件
-    data = request.json
-    if not data or 'src_path' not in data or 'dst_path' not in data:
-        return jsonify(success=False, error='参数缺失'), 400
-    src_rel = data['src_path']
-    dst_rel = data['dst_path']
-    abs_src = safe_join(FILE_ROOT, src_rel)
-    abs_dst_dir = safe_join(FILE_ROOT, dst_rel)
-    if not os.path.exists(abs_src):
-        return jsonify(success=False, error='源文件或目录不存在'), 404
-    if not os.path.isdir(abs_dst_dir):
-        return jsonify(success=False, error='目标目录不存在'), 404
-
-    # 防止将父目录移动到子目录，造成死循环
-    normalized_src_rel = os.path.normpath(src_rel)
-    normalized_dst_rel = os.path.normpath(dst_rel)
-    if normalized_dst_rel.startswith(normalized_src_rel + os.sep) or normalized_dst_rel == normalized_src_rel:
-        return jsonify(success=False, error='无法移动到自身或子目录'), 400
-
-    name = os.path.basename(abs_src)
-    abs_dst = os.path.join(abs_dst_dir, name)
-    if os.path.exists(abs_dst):
-        return jsonify(success=False, error='目标位置已有同名文件或目录'), 400
-    try:
-        os.rename(abs_src, abs_dst)
-    except Exception as e:
-        return jsonify(success=False, error=str(e)), 500
-    return jsonify(success=True)
-
-@app.route('/play/<path:media_path>')
-@login_required
-def play_file(media_path):
-    safe_path = safe_join(FILE_ROOT, media_path)
-    if not os.path.isfile(safe_path):
-        abort(404)
-    if not is_media_file(media_path):
-        return '不支持此格式在线播放', 400
-    filename = os.path.basename(media_path)
-    return render_template_string(PLAYER_HTML, file_url=url_for('download_file', download_path=media_path), filename=filename)
-
-@app.route('/login', methods=['GET','POST'])
-def login():
-    error = ''
-    if request.method == 'POST':
-        name = request.form.get('username')
-        pwd = request.form.get('password')
-        if not name or not pwd:
-            error = '请输入用户名和密码'
-        else:
-            db = get_db()
-            user = db.execute('SELECT * FROM user WHERE username=? AND password=?', (name, pwd)).fetchone()
-            if user:
-                session.clear()
-                session['user_id'] = user['id']
-                return redirect(url_for('index'))
-            else:
-                error = '用户名或密码错误'
-    return render_template_string(LOGIN_HTML, error=error)
-
-@app.route('/register', methods=['GET','POST'])
-def register():
-    error = ''
-    if request.method == 'POST':
-        name = request.form.get('username')
-        pwd = request.form.get('password')
-        if not name or not pwd:
-            error = '请输入用户名和密码'
-        else:
-            try:
-                db = get_db()
-                db.execute('INSERT INTO user (username, password) VALUES (?, ?)', (name, pwd))
-                db.commit()
-                return redirect(url_for('login'))
-            except sqlite3.IntegrityError:
-                error = '用户名已存在'
-    return render_template_string(REGISTER_HTML, error=error)
-
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect(url_for('login'))
-
-
-LOGIN_HTML = '''
-<!doctype html>
+# 模板（用render_template_string渲染）
+TEMPLATE = '''
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <title>登录</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body class="bg-light d-flex justify-content-center align-items-center" style="height:100vh;">
-<div class="card shadow-sm p-4" style="min-width:320px; max-width: 400px; width:100%;">
-  <h3 class="mb-3 text-center">登录</h3>
-  {% if error %}
-  <div class="alert alert-danger small mb-3">{{ error }}</div>
-  {% endif %}
-  <form method="post" novalidate>
-    <div class="mb-3">
-      <label for="username" class="form-label">用户名</label>
-      <input type="text" class="form-control" id="username" name="username" required autofocus>
-    </div>
-    <div class="mb-3">
-      <label for="password" class="form-label">密码</label>
-      <input type="password" class="form-control" id="password" name="password" required>
-    </div>
-    <button class="btn btn-primary w-100" type="submit">登录</button>
-  </form>
-  <hr>
-  <p class="text-center small mb-0">没有账号？ <a href="{{ url_for('register') }}">注册</a></p>
-</div>
-</body>
-</html>
-'''
-
-REGISTER_HTML = '''
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <title>注册</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body class="bg-light d-flex justify-content-center align-items-center" style="height:100vh;">
-<div class="card shadow-sm p-4" style="min-width:320px; max-width: 400px; width:100%;">
-  <h3 class="mb-3 text-center">注册</h3>
-  {% if error %}
-  <div class="alert alert-danger small mb-3">{{ error }}</div>
-  {% endif %}
-  <form method="post" novalidate>
-    <div class="mb-3">
-      <label for="username" class="form-label">用户名</label>
-      <input type="text" class="form-control" id="username" name="username" required autofocus>
-    </div>
-    <div class="mb-3">
-      <label for="password" class="form-label">密码</label>
-      <input type="password" class="form-control" id="password" name="password" required>
-    </div>
-    <button class="btn btn-primary w-100" type="submit">注册</button>
-  </form>
-  <hr>
-  <p class="text-center small mb-0">已有账号？ <a href="{{ url_for('login') }}">登录</a></p>
-</div>
-</body>
-</html>
-'''
-
-INDEX_HTML = '''
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <title>文件管理 - {{ path or "/" }}</title>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!-- Bootstrap 5 CSS -->
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <style>
-    body { font-family: Arial, sans-serif; background-color: #f8f9fa; min-height: 100vh; }
-    #filelist li { cursor: grab; }
-    #filelist li.dragging { opacity: 0.5; }
-    .file-name { user-select: none; }
-    a, button { user-select: none; }
-  </style>
+<meta charset="UTF-8">
+<title>文件管理系统</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<style>
+  body { background: #f8f9fa; }
+  table td, table th { vertical-align: middle !important; }
+</style>
 </head>
 <body>
-<nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+
+<nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
   <div class="container-fluid">
     <a class="navbar-brand" href="{{ url_for('index') }}">文件管理</a>
+    <div class="collapse navbar-collapse">
+      <nav aria-label="breadcrumb" class="ms-3">
+        <ol class="breadcrumb mb-0" id="breadcrumb-container"></ol>
+      </nav>
+    </div>
     <div>
-      <span class="text-light me-3">目录： /{{ path or "" }}</span>
-      <a href="{{ url_for('logout') }}" class="btn btn-outline-light btn-sm">登出</a>
+      <button class="btn btn-light btn-sm me-2" data-bs-toggle="modal" data-bs-target="#uploadModal">上传文件</button>
+      {% if 'user' in session %}
+      <a href="{{ url_for('logout') }}" class="btn btn-danger btn-sm">退出登录</a>
+      {% else %}
+      <a href="{{ url_for('login') }}" class="btn btn-success btn-sm">登录</a>
+      {% endif %}
     </div>
   </div>
 </nav>
 
-<div class="container py-4">
-  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-    <button class="btn btn-success" onclick="createFolder()">
-      <i class="bi bi-folder-plus"></i> 新建文件夹
-    </button>
-    <form id="upload-form" action="{{ url_for('upload_file', upload_path=path) }}" method="post" enctype="multipart/form-data" class="d-flex gap-2 align-items-center flex-wrap">
-      <input type="file" name="file" required class="form-control form-control-sm" style="max-width:300px;">
-      <button type="submit" class="btn btn-primary btn-sm">上传文件</button>
-    </form>
+<div class="container">
+  <div id="alert-container">{% with msgs = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in msgs %}
+    <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+      {{ msg }}<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="关闭"></button>
+    </div>
+    {% endfor %}{% endwith %}
   </div>
 
-  <ul id="filelist" class="list-group" ondragover="dragOver(event)" ondrop="drop(event, '{{ path }}')" >
-    {% if parent_path is not none %}
-      <li class="list-group-item d-flex justify-content-between align-items-center" draggable="false">
-        <a href="{{ url_for('index', req_path=parent_path) }}" class="text-decoration-none">&larr; .. (返回上层)</a>
-      </li>
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h4>目录: <span id="current-path">{{ current_path }}</span></h4>
+    {% if 'user' in session %}
+    <button class="btn btn-success btn-sm" data-bs-toggle="modal" data-bs-target="#mkdirModal">新建文件夹</button>
     {% endif %}
-    {% for d in dirs %}
-    <li class="list-group-item d-flex justify-content-between align-items-center" draggable="true" ondragstart="dragStart(event)" data-path="{{ d }}">
-      <div class="file-name">
-        📁 
-        <a href="{{ url_for('index', req_path=d) }}" class="link-primary text-decoration-none fw-semibold">{{ d|basename }}/</a>
-      </div>
-      <div class="btn-group btn-group-sm" role="group" aria-label="文件夹操作">
-        <button class="btn btn-warning" onclick="renameItem('{{ d }}')" title="重命名">
-          <i class="bi bi-pencil-square"></i>
-        </button>
-        <button class="btn btn-danger" onclick="deleteItem('{{ d }}')" title="删除">
-          <i class="bi bi-trash"></i>
-        </button>
-      </div>
-    </li>
-    {% endfor %}
-    {% for f in files %}
-    <li class="list-group-item d-flex justify-content-between align-items-center" draggable="true" ondragstart="dragStart(event)" data-path="{{ f }}">
-      <div class="file-name">
-        📄 {{ f|basename }}
-        [<a href="{{ url_for('download_file', download_path=f) }}" class="link-secondary" title="下载"><i class="bi bi-download"></i></a>]
-        {% if is_media(f) %}
-          [<a href="{{ url_for('play_file', media_path=f) }}" target="_blank" class="link-success" title="在线播放"><i class="bi bi-play-circle"></i></a>]
-        {% endif %}
-      </div>
-      <div class="btn-group btn-group-sm" role="group" aria-label="文件操作">
-        <button class="btn btn-warning" onclick="renameItem('{{ f }}')" title="重命名">
-          <i class="bi bi-pencil-square"></i>
-        </button>
-        <button class="btn btn-danger" onclick="deleteItem('{{ f }}')" title="删除">
-          <i class="bi bi-trash"></i>
-        </button>
-      </div>
-    </li>
-    {% endfor %}
-  </ul>
+  </div>
+
+  <div class="row row-cols-1 row-cols-md-2 g-3">
+    <div class="col">
+      <h5>文件夹</h5>
+      <table class="table table-striped table-hover">
+        <thead><tr><th>名称</th>{% if session.get('user') %}<th style="width:160px;">操作</th>{% endif %}</tr></thead>
+        <tbody>
+          {% if folders %}
+            {% for folder in folders %}
+            <tr>
+              <td><a href="{{ url_for('index', req_path=folder.relative_path) }}" class="text-decoration-none">{{ folder.name }}</a></td>
+              {% if session.get('user') %}
+              <td>
+                <button class="btn btn-sm btn-secondary rename-btn" data-path="{{ folder.relative_path }}" data-type="folder">重命名</button>
+                <button class="btn btn-sm btn-warning move-btn" data-path="{{ folder.relative_path }}" data-type="folder">移动</button>
+                <button class="btn btn-sm btn-danger delete-btn" data-path="{{ folder.relative_path }}" data-type="folder">删除</button>
+              </td>
+              {% endif %}
+            </tr>
+            {% endfor %}
+          {% else %}
+            <tr><td colspan="{{ 2 if session.get('user') else 1 }}" class="text-center">没有文件夹</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="col">
+      <h5>文件</h5>
+      <table class="table table-striped table-hover">
+        <thead><tr><th>名称</th>{% if session.get('user') %}<th style="width:180px;">操作</th>{% endif %}</tr></thead>
+        <tbody>
+          {% if files %}
+            {% for file in files %}
+            <tr>
+              <td>{{ file.name }}</td>
+              {% if session.get('user') %}
+              <td>
+                <a href="{{ url_for('download_file', file_path=file.relative_path) }}" class="btn btn-sm btn-primary" target="_blank" rel="noopener noreferrer">下载</a>
+                <button class="btn btn-sm btn-secondary rename-btn" data-path="{{ file.relative_path }}" data-type="file">重命名</button>
+                <button class="btn btn-sm btn-warning move-btn" data-path="{{ file.relative_path }}" data-type="file">移动</button>
+                <button class="btn btn-sm btn-danger delete-btn" data-path="{{ file.relative_path }}" data-type="file">删除</button>
+              </td>
+              {% endif %}
+            </tr>
+            {% endfor %}
+          {% else %}
+            <tr><td colspan="{{ 2 if session.get('user') else 1 }}" class="text-center">没有文件</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
-<!-- Bootstrap Icons CDN -->
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+{% if session.get('user') %}
+<!-- 上传文件模态框 -->
+<div class="modal fade" id="uploadModal" tabindex="-1" aria-labelledby="uploadModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <form id="uploadForm" enctype="multipart/form-data" class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="uploadModalLabel">上传文件</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+      </div>
+      <div class="modal-body">
+        <input type="file" name="file" id="fileInput" class="form-control" required>
+      </div>
+      <div class="modal-footer">
+        <button type="submit" class="btn btn-primary">上传</button>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+      </div>
+    </form>
+  </div>
+</div>
 
-<!-- Bootstrap 5 JS Bundle (popper + bootstrap) -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<!-- 新建文件夹模态框 -->
+<div class="modal fade" id="mkdirModal" tabindex="-1" aria-labelledby="mkdirModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <form id="mkdirForm" class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="mkdirModalLabel">新建文件夹</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+      </div>
+      <div class="modal-body">
+        <input type="text" id="folderNameInput" class="form-control" placeholder="文件夹名称" required>
+      </div>
+      <div class="modal-footer">
+        <button type="submit" class="btn btn-success">创建</button>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- 重命名模态框 -->
+<div class="modal fade" id="renameModal" tabindex="-1" aria-labelledby="renameModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <form id="renameForm" class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="renameModalLabel">重命名</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+      </div>
+      <div class="modal-body">
+        <input type="text" id="renameInput" class="form-control" placeholder="新名称" required>
+        <input type="hidden" id="renamePath">
+        <input type="hidden" id="renameType">
+      </div>
+      <div class="modal-footer">
+        <button type="submit" class="btn btn-primary">确定</button>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- 移动模态框 -->
+<div class="modal fade" id="moveModal" tabindex="-1" aria-labelledby="moveModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <form id="moveForm" class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="moveModalLabel">移动</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+      </div>
+      <div class="modal-body">
+        <input type="text" id="moveTargetPath" class="form-control" placeholder="目标目录（相对根目录路径）" required>
+        <input type="hidden" id="movePath">
+        <input type="hidden" id="moveType">
+      </div>
+      <div class="modal-footer">
+        <button type="submit" class="btn btn-warning">移动</button>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
 
 <script>
-let draggedPath = null;
+$(function(){
+  // 生成路径面包屑导航
+  function generateBreadcrumbs(path){
+    const container = $('#breadcrumb-container');
+    container.empty();
+    const parts = path ? path.split('/').filter(Boolean) : [];
+    let builtPath = '';
+    container.append('<li class="breadcrumb-item"><a href="{{ url_for("index") }}">根目录</a></li>');
+    parts.forEach((part, idx) => {
+      builtPath += (builtPath ? '/' : '') + part;
+      if(idx === parts.length - 1){
+        container.append('<li class="breadcrumb-item active" aria-current="page">'+part+'</li>');
+      } else {
+        container.append('<li class="breadcrumb-item"><a href="{{ url_for("index") }}?req_path='+encodeURIComponent(builtPath)+'">'+part+'</a></li>');
+      }
+    });
+  }
+  generateBreadcrumbs("{{ current_path }}");
 
-function dragStart(ev) {
-  draggedPath = ev.target.getAttribute('data-path');
-  ev.dataTransfer.effectAllowed = 'move';
-  ev.target.classList.add('dragging');
-}
-
-function dragOver(ev) {
-  ev.preventDefault();
-}
-
-function drop(ev, currentFolder) {
-  ev.preventDefault();
-  const li = document.querySelector('.dragging');
-  if(li) li.classList.remove('dragging');
-  if (!draggedPath) return;
-
-  // 防止将自身或子目录移动到当前目录
-  if (draggedPath === currentFolder || currentFolder.startsWith(draggedPath + '/')) {
-    alert('无法移动到自身或子目录');
-    draggedPath = null;
-    return;
+  // 显示提示信息
+  function showAlert(msg, type='success'){
+    $('#alert-container').html(
+      `<div class="alert alert-${type} alert-dismissible fade show" role="alert">
+        ${msg}
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="关闭"></button>
+      </div>`
+    );
   }
 
-  fetch('{{ url_for("move") }}', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ src_path: draggedPath, dst_path: currentFolder })
-  }).then(r => r.json())
-    .then(data => {
-      if (data.success) {
-        alert('移动成功');
-        location.reload();
-      } else {
-        alert('错误: ' + data.error);
-      }
-    })
-    .catch(() => alert('网络出错'));
-  draggedPath = null;
-}
+  {% if session.get('user') %}
+  // 上传文件
+  $('#uploadForm').submit(function(e){
+    e.preventDefault();
+    var formData = new FormData(this);
+    var uploadPath = encodeURIComponent("{{ current_path }}");
+    $.ajax({
+      url: '/upload/' + uploadPath,
+      type: 'POST',
+      data: formData,
+      contentType: false, processData: false,
+      success: function(){ location.reload(); },
+      error: function(xhr){ showAlert('上传失败：'+xhr.responseText,'danger'); }
+    });
+  });
 
-function renameItem(oldPath) {
-  let currentName = oldPath.split('/').pop();
-  let newName = prompt("输入新名称", currentName);
-  if (!newName) return;
-  newName = newName.trim();
-  if (newName.length === 0 || newName.includes('/') || newName.includes('\\')) {
-    alert('名称不合法');
-    return;
-  }
-  fetch('{{ url_for("rename") }}', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ old_path: oldPath, new_name: newName })
-  }).then(r => r.json())
-    .then(data => {
-      if (data.success) {
-        alert('重命名成功');
-        location.reload();
-      } else {
-        alert('错误: ' + data.error);
-      }
-    })
-    .catch(() => alert('网络出错'));
-}
+  // 新建文件夹
+  $('#mkdirForm').submit(function(e){
+    e.preventDefault();
+    var folderName = $('#folderNameInput').val().trim();
+    if(!folderName){ alert('请输入文件夹名称'); return; }
+    $.post('/mkdir',{
+      folder_path: "{{ current_path }}",
+      folder_name: folderName
+    }, function(res){
+      if(res.code===0){ $('#mkdirModal').modal('hide'); location.reload(); }
+      else showAlert(res.msg,'danger');
+    }).fail(()=>showAlert('新建文件夹请求失败','danger'));
+  });
 
-function deleteItem(path) {
-  if (!confirm('确定删除？该操作不可恢复')) return;
-  fetch('{{ url_for("delete") }}', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ path: path })
-  }).then(r => r.json())
-    .then(data => {
-      if (data.success) {
-        alert('删除成功');
-        location.reload();
-      } else {
-        alert('错误: ' + data.error);
-      }
-    })
-    .catch(() => alert('网络出错'));
-}
+  // 重命名弹窗打开
+  $('.rename-btn').click(function(){
+    $('#renameInput').val('');
+    $('#renamePath').val($(this).data('path'));
+    $('#renameType').val($(this).data('type'));
+    $('#renameModal').modal('show');
+  });
 
-function createFolder() {
-  let folderName = prompt("新建文件夹名称");
-  if (!folderName) return;
-  folderName = folderName.trim();
-  if (folderName.length === 0 || folderName.includes('/') || folderName.includes('\\')) {
-    alert('文件夹名称不合法');
-    return;
-  }
-  fetch('{{ url_for("mkdir") }}', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ parent_path: '{{ path }}', folder_name: folderName })
-  }).then(r => r.json())
-    .then(data => {
-      if(data.success){
-        alert('创建成功');
-        location.reload();
-      } else {
-        alert('错误: '+data.error);
-      }
-    })
-    .catch(() => alert('网络出错'));
-}
+  // 重命名提交
+  $('#renameForm').submit(function(e){
+    e.preventDefault();
+    var newName = $('#renameInput').val().trim();
+    if(!newName){ alert('请输入新名称'); return; }
+    $.post('/rename',{
+      old_path: $('#renamePath').val(),
+      new_name: newName,
+      type: $('#renameType').val()
+    }, function(res){
+      if(res.code===0){ $('#renameModal').modal('hide'); location.reload(); }
+      else showAlert(res.msg,'danger');
+    }).fail(()=>showAlert('重命名请求失败','danger'));
+  });
+
+  // 删除操作确认
+  $('.delete-btn').click(function(){
+    if(!confirm('确认删除？此操作不可恢复！')) return;
+    $.post('/delete', {
+      path: $(this).data('path'),
+      type: $(this).data('type')
+    }, function(res){
+      if(res.code===0) location.reload();
+      else showAlert(res.msg,'danger');
+    }).fail(()=>showAlert('删除请求失败','danger'));
+  });
+
+  // 移动弹窗打开
+  $('.move-btn').click(function(){
+    $('#moveTargetPath').val('');
+    $('#movePath').val($(this).data('path'));
+    $('#moveType').val($(this).data('type'));
+    $('#moveModal').modal('show');
+  });
+
+  // 移动提交
+  $('#moveForm').submit(function(e){
+    e.preventDefault();
+    var newPath = $('#moveTargetPath').val().trim();
+    if(!newPath){ alert('请输入目标目录'); return; }
+    $.post('/move',{
+      old_path: $('#movePath').val(),
+      new_path: newPath,
+      type: $('#moveType').val()
+    }, function(res){
+      if(res.code===0){ $('#moveModal').modal('hide'); location.reload(); }
+      else showAlert(res.msg,'danger');
+    }).fail(()=>showAlert('移动请求失败','danger'));
+  });
+  {% endif %}
+});
 </script>
 </body>
 </html>
 '''
 
-PLAYER_HTML = '''
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <title>在线播放 - {{ filename }}</title>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!-- Bootstrap 5 CSS -->
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <style>
-    body { background-color: #f8f9fa; padding: 2rem; text-align: center; }
-    video, audio { max-width: 100%; border-radius: 0.3rem; outline: none; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h2 class="mb-4">在线播放：{{ filename }}</h2>
-    {% if file_url.endswith(('.mp4', '.webm', '.ogg')) %}
-    <video controls autoplay muted playsinline>
-      <source src="{{ file_url }}">
-      浏览器不支持视频播放。
-    </video>
-    {% elif file_url.endswith(('.mp3', '.wav', '.m4a')) %}
-    <audio controls autoplay>
-      <source src="{{ file_url }}">
-      浏览器不支持音频播放。
-    </audio>
-    {% else %}
-    <p class="text-danger fw-semibold">不支持的媒体格式。</p>
-    {% endif %}
-    <div class="mt-4">
-      <a href="{{ url_for('index') }}" class="btn btn-secondary">返回文件管理</a>
-    </div>
-  </div>
-  <!-- Bootstrap JS Bundle -->
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-'''
+# --------- 辅助函数 ---------
 
-if __name__ == '__main__':
-    app.run(debug=True)
+def secure_relative_path(path_str):
+    """
+    按安全标准处理相对路径，防止目录遍历攻击
+    返回Path或None表示非法路径
+    """
+    if not path_str:
+        return Path()
+    p = Path(path_str)
+    # 过滤绝对路径和父目录跳转
+    if p.is_absolute():
+        return None
+    if '..' in p.parts:
+        return None
+    return p
+
+def resolve_path(rel_path):
+    """
+    接收相对路径字符串，经过安全检查后解析为系统绝对路径，如果不安全返回None
+    """
+    rel_p = secure_relative_path(rel_path)
+    if rel_p is None:
+        return None
+    abs_p = BASE_DIR / rel_p
+    try:
+        abs_p = abs_p.resolve(strict=False)
+        if BASE_DIR in abs_p.parents or abs_p==BASE_DIR:
+            return abs_p
+        else:
+            return None
+    except Exception:
+        return None
+
+def list_dir(rel_path):
+    """
+    列出指定相对目录下的文件夹和文件
+    返回两个列表，元素为dict：{name, relative_path}
+    """
+    abs_path = resolve_path(rel_path)
+    if abs_path is None or not abs_path.is_dir():
+        return [], []
+
+    folders = []
+    files = []
+    try:
+        for entry in abs_path.iterdir():
+            rel_ent = entry.relative_to(BASE_DIR)
+            info = {"name": entry.name, "relative_path": str(rel_ent).replace('\\', '/')}
+            if entry.is_dir():
+                folders.append(info)
+            elif entry.is_file():
+                files.append(info)
+    except Exception:
+        pass
+    # 按名称排序
+    folders.sort(key=lambda x: x['name'].lower())
+    files.sort(key=lambda x: x['name'].lower())
+    return folders, files
+
+def is_user_logged_in():
+    # 简单登录判断，实际可根据业务完善
+    return session.get('user') == 'admin'
+
+# --------- 路由定义 ---------
+
+from flask import flash
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    # 简易登录页面，仅为示范，密码写死admin/123
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        if username == "admin" and password == "123":
+            session['user'] = 'admin'
+            return redirect(url_for('index'))
+        else:
+            flash("用户名密码错误", "danger")
+    return render_template_string('''
+    <!doctype html>
+    <html lang="zh-CN"><head><meta charset="utf-8"><title>登录</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head>
+    <body class="bg-light d-flex align-items-center" style="height:100vh;">
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-md-4 col-10 bg-white p-4 rounded shadow">
+          <h3 class="mb-3 text-center">登录</h3>
+          {% with msgs = get_flashed_messages(with_categories=true) %}
+            {% for category,msg in msgs %}
+            <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+              {{ msg }}<button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            {% endfor %}
+          {% endwith %}
+          <form method="post">
+            <div class="mb-3"><input type="text" name="username" required class="form-control" placeholder="用户名"></div>
+            <div class="mb-3"><input type="password" name="password" required class="form-control" placeholder="密码"></div>
+            <button type="submit" class="btn btn-primary w-100">登录</button>
+          </form>
+        </div>
+      </div>
+    </div>
+    </body></html>
+    ''')
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+@app.route("/", defaults={"req_path": ""})
+@app.route("/<path:req_path>")
+def index(req_path):
+    # 首页展示目录文件列表
+    if not is_user_logged_in():
+        return redirect(url_for("login"))
+
+    abs_path = resolve_path(req_path)
+    if abs_path is None or not abs_path.exists():
+        flash("路径不存在或非法", "danger")
+        return redirect(url_for("index"))
+    if abs_path.is_file():
+        # 如果访问路径是文件，直接下载
+        return redirect(url_for("download_file", file_path=req_path))
+
+    folders, files = list_dir(req_path)
+
+    return render_template_string(
+        TEMPLATE,
+        current_path=req_path.strip('/'),
+        folders=folders,
+        files=files
+    )
+
+@app.route("/download/<path:file_path>")
+def download_file(file_path):
+    p = resolve_path(file_path)
+    if p is None or not p.is_file():
+        return "文件不存在或非法路径", 404
+    return send_file(p, as_attachment=True)
+
+@app.route("/upload/<path:req_path>", methods=["POST"])
+def upload_file(req_path):
+    if not is_user_logged_in():
+        return "未登录", 403
+    abs_path = resolve_path(req_path)
+    if abs_path is None or not abs_path.is_dir():
+        return "上传目录不存在或非法", 400
+    if 'file' not in request.files:
+        return "未接收到文件", 400
+    file = request.files['file']
+    if file.filename == '':
+        return "未选择文件", 400
+    filename = secure_filename(file.filename)
+    dest = abs_path / filename
+    try:
+        file.save(dest)
+    except Exception as e:
+        return f"保存文件失败: {e}", 500
+    return '', 204
+
+@app.route("/mkdir", methods=["POST"])
+def mkdir():
+    if not is_user_logged_in():
+        return jsonify({"code":1, "msg":"未登录"})
+    folder_path = request.form.get("folder_path", "")
+    folder_name = request.form.get("folder_name", "").strip()
+    if not folder_name:
+        return jsonify({"code":1, "msg":"文件夹名称不能为空"})
+    base_dir = resolve_path(folder_path)
+    if base_dir is None or not base_dir.is_dir():
+        return jsonify({"code":1, "msg":"目标路径无效"})
+    name_safe = secure_filename(folder_name)
+    new_dir = base_dir / name_safe
+    try:
+        new_dir.mkdir(exist_ok=False)
+        return jsonify({"code":0, "msg":"创建成功"})
+    except FileExistsError:
+        return jsonify({"code":1, "msg":"文件夹已存在"})
+    except Exception as e:
+        return jsonify({"code":1, "msg":f"创建失败: {e}"})
+
+@app.route("/rename", methods=["POST"])
+def rename():
+    if not is_user_logged_in():
+        return jsonify({"code":1, "msg":"未登录"})
+    old_path = request.form.get("old_path", "")
+    new_name = request.form.get("new_name", "").strip()
+    typ = request.form.get("type", "")
+    if not new_name:
+        return jsonify({"code":1, "msg":"新名称不能为空"})
+    old_abs = resolve_path(old_path)
+    if old_abs is None or not old_abs.exists():
+        return jsonify({"code":1, "msg":"旧路径不存在"})
+    parent_dir = old_abs.parent
+    new_name_safe = secure_filename(new_name)
+    if typ=="file" and '.' not in new_name_safe:
+        # 保持原文件后缀
+        suffix = old_abs.suffix
+        if suffix:
+            new_name_safe += suffix
+    new_abs = parent_dir / new_name_safe
+    if new_abs.exists():
+        return jsonify({"code":1, "msg":"新名称已存在"})
+    try:
+        old_abs.rename(new_abs)
+        return jsonify({"code":0, "msg":"重命名成功"})
+    except Exception as e:
+        return jsonify({"code":1, "msg":f"重命名失败: {e}"})
+
+@app.route("/delete", methods=["POST"])
+def delete():
+    if not is_user_logged_in():
+        return jsonify({"code":1, "msg":"未登录"})
+    path = request.form.get("path", "")
+    typ = request.form.get("type", "")
+    p = resolve_path(path)
+    if p is None or not p.exists():
+        return jsonify({"code":1, "msg":"路径不存在"})
+    try:
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+        return jsonify({"code":0, "msg":"删除成功"})
+    except Exception as e:
+        return jsonify({"code":1, "msg":f"删除失败: {e}"})
+
+@app.route("/move", methods=["POST"])
+def move():
+    if not is_user_logged_in():
+        return jsonify({"code":1, "msg":"未登录"})
+    old_path = request.form.get("old_path", "")
+    new_path = request.form.get("new_path", "").strip("/")
+    typ = request.form.get("type", "")
+    old_abs = resolve_path(old_path)
+    if old_abs is None or not old_abs.exists():
+        return jsonify({"code":1, "msg":"源路径不存在"})
+    dest_dir = resolve_path(new_path)
+    if dest_dir is None or not dest_dir.is_dir():
+        return jsonify({"code":1, "msg":"目标目录不存在"})
+    new_abs = dest_dir / old_abs.name
+    if new_abs.exists():
+        return jsonify({"code":1, "msg":"目标目录已存在重名文件或文件夹"})
+    try:
+        shutil.move(str(old_abs), str(new_abs))
+        return jsonify({"code":0, "msg":"移动成功"})
+    except Exception as e:
+        return jsonify({"code":1, "msg":f"移动失败: {e}"})
+
+
+if __name__ == "__main__":
+    print("运行 Flask 文件管理系统，默认用户：admin 密码：123")
+    app.run(debug=True, port=5000)
