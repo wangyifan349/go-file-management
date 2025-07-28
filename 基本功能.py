@@ -678,3 +678,384 @@ window.onload = loadTree;
 </script>
 </body>
 </html>
+
+
+
+
+package main
+
+import (
+    "errors"
+    "io"
+    "net/http"
+    "os"
+    "path/filepath"
+    "sort"
+    "strings"
+
+    "github.com/gin-gonic/gin"
+)
+
+const storageRoot = "./storage" // 根目录存储路径
+
+// FileItem 表示单个文件或文件夹节点的结构体
+type FileItem struct {
+    Name     string     `json:"name"`               // 文件或文件夹名称
+    Path     string     `json:"path"`               // 相对路径，统一使用 '/' 作为分隔符
+    IsDir    bool       `json:"isDir"`              // 是否是文件夹
+    Size     int64      `json:"size,omitempty"`     // 文件大小，文件夹无大小
+    Children []FileItem `json:"children,omitempty"` // 子文件夹内文件列表
+}
+
+// safeJoin 安全拼接路径，防止目录遍历攻击
+func safeJoin(root string, paths ...string) (string, error) {
+    fullPath := filepath.Join(append([]string{root}, paths...)...)
+    absRoot, err := filepath.Abs(root)
+    if err != nil {
+        return "", err
+    }
+    absPath, err := filepath.Abs(fullPath)
+    if err != nil {
+        return "", err
+    }
+    if !strings.HasPrefix(absPath, absRoot) {
+        return "", errors.New("非法路径访问")
+    }
+    return absPath, nil
+}
+
+// getItemInfo 获取文件或文件夹基础信息，入参为绝对路径和相对路径
+func getItemInfo(absPath, relPath string) (FileItem, error) {
+    info, err := os.Stat(absPath)
+    if err != nil {
+        return FileItem{}, err
+    }
+    return FileItem{
+        Name:  info.Name(),
+        Path:  filepath.ToSlash(relPath),
+        IsDir: info.IsDir(),
+        Size:  func() int64 { if info.IsDir() { return 0 }; return info.Size() }(),
+    }, nil
+}
+
+// listDirectoryRecursive 递归获取目录列表和文件，构建树形结构
+func listDirectoryRecursive(relPath string) ([]FileItem, error) {
+    absPath, err := safeJoin(storageRoot, relPath)
+    if err != nil {
+        return nil, err
+    }
+    entries, err := os.ReadDir(absPath)
+    if err != nil {
+        return nil, err
+    }
+
+    // 按字母排序
+    sort.Slice(entries, func(i, j int) bool {
+        return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
+    })
+
+    var items []FileItem
+    for _, entry := range entries {
+        childRelPath := filepath.Join(relPath, entry.Name())
+        childAbsPath := filepath.Join(absPath, entry.Name())
+
+        item, err := getItemInfo(childAbsPath, childRelPath)
+        if err != nil {
+            continue // 忽略错误文件/目录
+        }
+        if item.IsDir {
+            children, err := listDirectoryRecursive(childRelPath)
+            if err == nil {
+                item.Children = children
+            }
+        }
+        items = append(items, item)
+    }
+    return items, nil
+}
+
+func main() {
+    // 确保存储根目录存在
+    if _, err := os.Stat(storageRoot); os.IsNotExist(err) {
+        os.Mkdir(storageRoot, os.ModePerm)
+    }
+
+    router := gin.Default()
+    router.LoadHTMLFiles("templates/index.html")
+    router.Static("/static", "./static")
+
+    // 首页：渲染主页模板
+    router.GET("/", func(ctx *gin.Context) {
+        ctx.HTML(http.StatusOK, "index.html", nil)
+    })
+
+    // API: 获取目录树结构
+    router.GET("/api/tree", func(ctx *gin.Context) {
+        tree, err := listDirectoryRecursive("")
+        if err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+            return
+        }
+        ctx.JSON(http.StatusOK, gin.H{"tree": tree})
+    })
+
+    // API: 下载文件接口，根据路径参数提供文件下载
+    router.GET("/api/download", func(ctx *gin.Context) {
+        relFilePath := ctx.Query("path")
+        if relFilePath == "" {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "缺少文件路径参数"})
+            return
+        }
+        absFilePath, err := safeJoin(storageRoot, relFilePath)
+        if err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+            return
+        }
+        info, err := os.Stat(absFilePath)
+        if err != nil || info.IsDir() {
+            ctx.JSON(http.StatusNotFound, gin.H{"error": "文件不存在或者路径是文件夹"})
+            return
+        }
+        ctx.FileAttachment(absFilePath, info.Name())
+    })
+
+    // API: 创建文件夹，传递JSON参数 { path: 父目录路径, name: 新文件夹名 }
+    router.POST("/api/mkdir", func(ctx *gin.Context) {
+        var req struct {
+            DirPath string `json:"path"` // 父目录相对路径
+            DirName string `json:"name"` // 新文件夹名
+        }
+        if err := ctx.ShouldBindJSON(&req); err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "参数解析失败"})
+            return
+        }
+        if req.DirName == "" {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "缺少新文件夹名称"})
+            return
+        }
+        if strings.ContainsAny(req.DirName, "/\\") {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "文件夹名称不能包含路径分隔符"})
+            return
+        }
+        absParentPath, err := safeJoin(storageRoot, req.DirPath)
+        if err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+            return
+        }
+        info, err := os.Stat(absParentPath)
+        if err != nil || !info.IsDir() {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "父目录不存在"})
+            return
+        }
+        newDirPath := filepath.Join(absParentPath, req.DirName)
+        if _, err := os.Stat(newDirPath); err == nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "目标文件夹已存在"})
+            return
+        }
+        if err := os.Mkdir(newDirPath, 0755); err != nil {
+            ctx.JSON(http.StatusInternalServerError, gin.H{"error": "创建文件夹失败"})
+            return
+        }
+        ctx.JSON(http.StatusOK, gin.H{"message": "文件夹创建成功"})
+    })
+
+    // API: 删除文件或文件夹，传递JSON参数 { path: 需删除文件或文件夹相对路径 }
+    router.POST("/api/delete", func(ctx *gin.Context) {
+        var req struct {
+            TargetPath string `json:"path"` // 目标相对路径
+        }
+        if err := ctx.ShouldBindJSON(&req); err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "参数解析失败"})
+            return
+        }
+        if req.TargetPath == "" {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "缺少路径参数"})
+            return
+        }
+        absTargetPath, err := safeJoin(storageRoot, req.TargetPath)
+        if err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+            return
+        }
+        if _, err := os.Stat(absTargetPath); err != nil {
+            ctx.JSON(http.StatusNotFound, gin.H{"error": "路径不存在"})
+            return
+        }
+        if err := os.RemoveAll(absTargetPath); err != nil {
+            ctx.JSON(http.StatusInternalServerError, gin.H{"error": "删除失败"})
+            return
+        }
+        ctx.JSON(http.StatusOK, gin.H{"message": "删除成功"})
+    })
+
+    // API: 重命名，传递JSON参数 { oldPath: 旧filepath, newName: 新名称 }
+    router.POST("/api/rename", func(ctx *gin.Context) {
+        var req struct {
+            OldPath string `json:"oldPath"`
+            NewName string `json:"newName"`
+        }
+        if err := ctx.ShouldBindJSON(&req); err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "参数解析失败"})
+            return
+        }
+        if req.OldPath == "" || req.NewName == "" {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "缺少参数"})
+            return
+        }
+        if strings.ContainsAny(req.NewName, "/\\") {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "新名称不能包含路径分隔符"})
+            return
+        }
+        absOldPath, err := safeJoin(storageRoot, req.OldPath)
+        if err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+            return
+        }
+        if _, err := os.Stat(absOldPath); err != nil {
+            ctx.JSON(http.StatusNotFound, gin.H{"error": "旧路径不存在"})
+            return
+        }
+        absNewPath := filepath.Join(filepath.Dir(absOldPath), req.NewName)
+        absNewPath, err = filepath.Abs(absNewPath)
+        if err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+            return
+        }
+        absRoot, _ := filepath.Abs(storageRoot)
+        if !strings.HasPrefix(absNewPath, absRoot) {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "非法路径"})
+            return
+        }
+        if _, err := os.Stat(absNewPath); err == nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "目标名称已存在"})
+            return
+        }
+        if err := os.Rename(absOldPath, absNewPath); err != nil {
+            ctx.JSON(http.StatusInternalServerError, gin.H{"error": "重命名失败"})
+            return
+        }
+        ctx.JSON(http.StatusOK, gin.H{"message": "重命名成功"})
+    })
+
+    // API: 移动文件或文件夹, 参数 { sourcePath: 源相对路径, targetDir: 目标目录路径 }
+    router.POST("/api/move", func(ctx *gin.Context) {
+        var req struct {
+            SourcePath string `json:"sourcePath"`
+            TargetDir  string `json:"targetDir"`
+        }
+        if err := ctx.ShouldBindJSON(&req); err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "参数解析失败"})
+            return
+        }
+        if req.SourcePath == "" || req.TargetDir == "" {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "参数缺失"})
+            return
+        }
+        absSrcPath, err := safeJoin(storageRoot, req.SourcePath)
+        if err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+            return
+        }
+        absTargetDir, err := safeJoin(storageRoot, req.TargetDir)
+        if err != nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+            return
+        }
+        srcInfo, err := os.Stat(absSrcPath)
+        if err != nil {
+            ctx.JSON(http.StatusNotFound, gin.H{"error": "源路径不存在"})
+            return
+        }
+        targetInfo, err := os.Stat(absTargetDir)
+        if err != nil || !targetInfo.IsDir() {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "目标路径不是目录"})
+            return
+        }
+        baseName := filepath.Base(absSrcPath)
+        absDestPath := filepath.Join(absTargetDir, baseName)
+
+        if _, err := os.Stat(absDestPath); err == nil {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "目标位置已存在同名文件或文件夹"})
+            return
+        }
+        if srcInfo.IsDir() && (absDestPath == absSrcPath || strings.HasPrefix(absDestPath, absSrcPath+string(os.PathSeparator))) {
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "不能把文件夹移到其子目录或自身"})
+            return
+        }
+
+        if err := os.Rename(absSrcPath, absDestPath); err != nil {
+            if moveErr := moveCrossDevice(absSrcPath, absDestPath); moveErr != nil {
+                ctx.JSON(http.StatusInternalServerError, gin.H{"error": "移动失败: " + moveErr.Error()})
+                return
+            }
+        }
+        ctx.JSON(http.StatusOK, gin.H{"message": "移动成功"})
+    })
+
+    router.Run(":8080")
+}
+
+// moveCrossDevice 跨设备移动，先复制文件/目录再删除源
+func moveCrossDevice(srcPath, destPath string) error {
+    info, err := os.Stat(srcPath)
+    if err != nil {
+        return err
+    }
+    if info.IsDir() {
+        if err := copyDirectory(srcPath, destPath); err != nil {
+            return err
+        }
+        return os.RemoveAll(srcPath)
+    } else {
+        if err := copyFile(srcPath, destPath); err != nil {
+            return err
+        }
+        return os.Remove(srcPath)
+    }
+}
+
+// copyDirectory 递归复制文件夹
+func copyDirectory(srcDir, destDir string) error {
+    entries, err := os.ReadDir(srcDir)
+    if err != nil {
+        return err
+    }
+    if err := os.MkdirAll(destDir, 0755); err != nil {
+        return err
+    }
+    for _, entry := range entries {
+        srcEntry := filepath.Join(srcDir, entry.Name())
+        destEntry := filepath.Join(destDir, entry.Name())
+        if entry.IsDir() {
+            if err := copyDirectory(srcEntry, destEntry); err != nil {
+                return err
+            }
+        } else {
+            if err := copyFile(srcEntry, destEntry); err != nil {
+                return err
+            }
+        }
+    }
+    return nil
+}
+
+// copyFile 复制单个文件内容
+func copyFile(srcFile, destFile string) error {
+    in, err := os.Open(srcFile)
+    if err != nil {
+        return err
+    }
+    defer in.Close()
+
+    out, err := os.Create(destFile)
+    if err != nil {
+        return err
+    }
+    defer out.Close()
+
+    _, err = io.Copy(out, in)
+    return err
+}
+
+
+
